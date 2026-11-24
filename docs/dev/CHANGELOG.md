@@ -456,3 +456,26 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
   users on 8 threads and compares every GLSL source with the serial output (Linux native suite and Windows
   validate_port); unit tests updated for the force/memo/exit-code contracts and the new fingerprint inputs.
   `scripts/ci.sh`: 220 unit tests (10 skipped); native suite and a runtime-only CMake build of the changed units pass.
+
+## 2026-11-24 — post-merge PR #231 review fixes
+
+- Windows cache validation now uses a 64-bit file-size query, so a valid `cache/spirv.pack` larger than 2 GiB does not force a
+  full precompile after every build.
+- The translator's remaining lazy diagnostics caches are thread-local. The parallel translation test now holds workers at a
+  start gate, compares their concurrent first translations with a serial baseline generated only after they join, and checks
+  thread-creation failures.
+- A precompile writes a current signature only after the scan and all build passes complete without unexpected failures.
+  Source reads and xbc1 decompression share RAM-bounded admission budgets; scanner count is RAM-aware and every worker phase
+  joins only threads that started.
+- A forced rerun validates the root and invalidates the old stamp before deleting crash-retry records, and performs that
+  deletion only after Vulkan initialization succeeds. Loose-SPIR-V mode has its own completion marker; a persistence-disabled
+  run cannot stamp the cache current.
+- The build fingerprint now includes the game-file reader and the GLSL replacement headers (bloom and GTAO). The runtime
+  signature includes the corresponding replacement/patch switches, GPL/layout policy and SPIR-V cache-mode options; the
+  artifacts revision was bumped for the GTAO change already on main.
+- The launcher no longer reports an unknown status probe as prepared, retries verification explicitly, and restores/unsets
+  Diagnostics environment rows when they are removed. RecompLauncher's builder skips the unbounded full run after a failed
+  status probe and treats a full-run spawn failure as non-fatal.
+- Validation: 242 unit tests (10 skipped), the Linux native suite, focused Clang/GCC signature tests, a cold-start translator
+  TSAN run, targeted Clang compilation of `precompile.c`, and ASan/UBSan cache-mode/scanner harnesses (including a sparse
+  3 GiB pack) pass. The Windows branch was source-reviewed but not executed locally.

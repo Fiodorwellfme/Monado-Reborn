@@ -12,4 +12,5 @@
 // considers the cache stale and warms it again. Cosmetic refactors do not need a bump.
 #pragma once
 
-#define XCDE_PRECOMPILE_ARTIFACTS_REV 1u
+// 2: [XCDE] GTAO replacement shaders now participate in compile_program / the precompiled SPIR-V set.
+#define XCDE_PRECOMPILE_ARTIFACTS_REV 2u

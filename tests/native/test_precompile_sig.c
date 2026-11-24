@@ -1,7 +1,7 @@
 // [XCDE] T282: vk_precompile_sig - the signature that decides whether the precompiled shader cache is current. The
-// inputs are the build's translator/SPIR-V compiler fingerprint (XCDE_SHADER_SIG), the revision of exec.c's build path,
-// the environment switches that change the translation/SPIR-V/passes and the game files; the build generates
-// shader_sig.h, this test passes the macro instead.
+// inputs are the build's game-file/translator/replacement-GLSL/SPIR-V compiler fingerprint (XCDE_SHADER_SIG), the
+// revision of exec.c's build path, the environment switches that change translation, replacements, pipeline/layout
+// artifacts or cache modes, and the game files; the build generates shader_sig.h, this test passes the macro instead.
 #ifndef XCDE_SHADER_SIG
 #error "test_precompile_sig needs -DXCDE_SHADER_SIG=... (precompile_sig.c takes it when the build header is absent)"
 #endif
@@ -61,6 +61,23 @@ static int failures;
 
 static char root[1024];
 
+// Keep the test's environment clean even when it inherits a developer's XCDE_* / LARECOMP_* settings.
+static const char *const k_sig_env[] = {
+    "LARECOMP_VK_OPT", "XCDE_FS_OPT", "XCDE_SPIRV_LOOSE", "LARECOMP_VK_NO_SPIRV_CACHE",
+    "XCDE_STATIC_STACKS", "XCDE_RSC_PIXEL", "XCDE_D16_REF", "XCDE_SCALED_GATHER", "LARECOMP_NO_DISCARD",
+    "XCDE_HW_FP16", "XCDE_EARLY_FS", "XCDE_STRUCTURED_CFG", "LARECOMP_SAVE_MSL",
+    "XCDE_BLOOM_PREFILTER", "XCDE_BLOOM_FILTER", "XCDE_GTAO", "XCDE_CHAR_LIGHT", "XCDE_TMAA_TEXEL",
+    "XCDE_GLSL_DIR", "LARECOMP_VK_GPL", "XCDE_VK_GPL", "XCDE_PUSH_DESC", "XCDE_CANON", "XCDE_GPL_RETAIN",
+    "LARECOMP_VK_D24", "XCDE_PRECOMPILE_LIBS", "XCDE_PRECOMPILE_PIPELINES",
+};
+static const struct { const char *name, *value; } k_artifact_env[] = {
+    {"LARECOMP_VK_GPL", "0"}, {"XCDE_VK_GPL", "1"},
+    {"XCDE_BLOOM_PREFILTER", "1"}, {"XCDE_BLOOM_FILTER", "0"}, {"XCDE_GTAO", "0"},
+    {"XCDE_CHAR_LIGHT", "0.5"}, {"XCDE_TMAA_TEXEL", "0"}, {"XCDE_GLSL_DIR", "override-glsl"},
+    {"XCDE_PUSH_DESC", "0"}, {"XCDE_CANON", "0"}, {"XCDE_GPL_RETAIN", "1"}, {"LARECOMP_VK_D24", "0"},
+    {"LARECOMP_SAVE_MSL", "1"}, {"XCDE_SPIRV_LOOSE", "1"}, {"LARECOMP_VK_NO_SPIRV_CACHE", "1"},
+};
+
 static void path_of(char *out, size_t cap, const char *rel) { snprintf(out, cap, "%s/%s", root, rel); }
 static void write_file(const char *rel, const char *data, size_t n) {
     char p[1200];
@@ -90,10 +107,7 @@ static bool hex16(const char *s) {
     return true;
 }
 static void clear_env(void) {
-    set_env("XCDE_FS_OPT", NULL);
-    set_env("LARECOMP_VK_OPT", NULL);
-    set_env("XCDE_STATIC_STACKS", NULL);
-    set_env("XCDE_PRECOMPILE_PIPELINES", NULL);
+    for (size_t i = 0; i < sizeof k_sig_env / sizeof k_sig_env[0]; i++) set_env(k_sig_env[i], NULL);
 }
 
 int main(void) {
@@ -194,6 +208,18 @@ int main(void) {
     CHECK(sig_of("dump", b));
     CHECK(strcmp(a, b) != 0);
     clear_env();
+
+    // Every artifact-affecting switch added by the coverage audit independently changes the signature. One
+    // representative value per switch is enough: the unset/empty/value contract is exercised above.
+    CHECK(sig_of("dump", a));
+    for (size_t i = 0; i < sizeof k_artifact_env / sizeof k_artifact_env[0]; i++) {
+        set_env(k_artifact_env[i].name, k_artifact_env[i].value);
+        CHECK(sig_of("dump", b));
+        CHECK(strcmp(a, b) != 0);
+        set_env(k_artifact_env[i].name, NULL);
+        CHECK(sig_of("dump", b));
+        CHECK(!strcmp(a, b));  // (back to the baseline)
+    }
 
     // The shipped variant seed: new recorded variants mean new jobs to warm.
     CHECK(sig_of("dump", a));

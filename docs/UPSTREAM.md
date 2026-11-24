@@ -279,6 +279,10 @@ Details and the reporter's log evidence: [CHANGELOG](dev/CHANGELOG.md).
   (new), `tests/unit/test_recomplauncher_support.py`, `tests/unit/test_launcher_utf8_paths.py`. The native test builds a
   unique temp root, and covers isolated removal, a same-size mtime-only edit, a plain-file root, a folder without
   `romfs/`, set-empty vs unset options and one translator/pass switch.
+- Post-merge review fixes: 64-bit Windows pack validation; complete-run-only stamps; RAM-bounded source/decompression and
+  checked thread startup; safe forced-redo ordering; loose-cache completion tracking; game-file-reader and replacement-GLSL
+  headers in the build fingerprint; GPL/patch/cache-mode environment inputs in the runtime signature; honest UNKNOWN status
+  handling and reversible Diagnostics environment rows in the launcher.
 
 ## 5.1 surround sound output (2026-11-24)
 

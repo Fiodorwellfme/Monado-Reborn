@@ -1,21 +1,25 @@
 // [XCDE] T282: the "are the precompiled shaders current?" signature.
 //
 // What the precompile writes (cache/spirv, the driver's shader and pipeline caches warmed by the program/seed/pipeline
-// passes) is decided by the translator, the SPIR-V compiler options and the game files - not by the size and time of
-// the executable. The done stamp used to name the executable, so every rebuild precompiled the shaders again; an edit
-// to the launcher, the UI or gameplay code has no effect on the shaders, but cost a full warm run (the scan, every
-// translation and driver pipeline creation).
+// passes) is decided by the game-file discovery, translator/replacement sources, SPIR-V compiler options and game files -
+// not by the size and time of the executable. The done stamp used to name the executable, so every rebuild recompiled
+// the shaders again; an edit to the launcher, the UI or gameplay code has no effect on the shaders, but cost a full warm
+// run (the scan, every translation and driver pipeline creation).
 //
 // The signature (FNV-1a 64) covers:
-//  - XCDE_SHADER_SIG: the build's fingerprint of the translator and SPIR-V compiler sources (tools/build/shader_sig.py;
-//    <build>/inc/shader_sig.h, or -DXCDE_SHADER_SIG for a native test).
+//  - XCDE_SHADER_SIG: the build's fingerprint of the game-file discovery, translator, replacement-GLSL and SPIR-V
+//    compiler sources (tools/build/shader_sig.py; <build>/inc/shader_sig.h, or -DXCDE_SHADER_SIG for a native test).
 //  - XCDE_PRECOMPILE_ARTIFACTS_REV (precompile_rev.h): revision of exec.c's build path, which shader_sig.py cannot hash
 //    without invalidating on gameplay changes; bump it when the pipeline state/libraries that pass builds change.
 //  - the environment options, by PRESENCE and value (a set-but-empty variable is not the same as an unset one, because
-//    stage_opt()/getenv() see "" as set): the SPIR-V optimisation (LARECOMP_VK_OPT, XCDE_FS_OPT), the translator
-//    switches that change the emitted GLSL (XCDE_STATIC_STACKS, XCDE_RSC_PIXEL, XCDE_D16_REF, XCDE_SCALED_GATHER,
-//    LARECOMP_NO_DISCARD, XCDE_HW_FP16, XCDE_EARLY_FS, XCDE_STRUCTURED_CFG) and the precompile's own pass switches
-//    (XCDE_PRECOMPILE_LIBS, XCDE_PRECOMPILE_PIPELINES).
+//    stage_opt()/getenv() see "" as set): the SPIR-V optimisation/cache modes (LARECOMP_VK_OPT, XCDE_FS_OPT,
+//    XCDE_SPIRV_LOOSE, LARECOMP_VK_NO_SPIRV_CACHE), the translator switches that change the emitted GLSL
+//    (XCDE_STATIC_STACKS, XCDE_RSC_PIXEL, XCDE_D16_REF, XCDE_SCALED_GATHER, LARECOMP_NO_DISCARD, XCDE_HW_FP16,
+//    XCDE_EARLY_FS, XCDE_STRUCTURED_CFG, LARECOMP_SAVE_MSL), the replacement/patch sources and overrides
+//    (XCDE_BLOOM_PREFILTER, XCDE_BLOOM_FILTER, XCDE_GTAO, XCDE_CHAR_LIGHT, XCDE_TMAA_TEXEL, XCDE_GLSL_DIR), the
+//    pipeline/layout policy reachable from the precompile build (LARECOMP_VK_GPL, XCDE_VK_GPL, XCDE_PUSH_DESC,
+//    XCDE_CANON, XCDE_GPL_RETAIN, LARECOMP_VK_D24) and the precompile's own pass switches (XCDE_PRECOMPILE_LIBS,
+//    XCDE_PRECOMPILE_PIPELINES).
 //  - the game files: every file under <root>/romfs by relative name, size and mtime (for a .nup package: its 64-bit
 //    size and mtime). A new, changed or removed shader container can add or change programs.
 //  - the shipped variant seed (XCDE_VARIANTS_SEED or data/variants_seed.bin): size and mtime. New recorded variants
@@ -140,16 +144,28 @@ static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, 
 // Everything that changes what a run warms. Presence AND value: XCDE_FS_OPT= (empty) disables the optimisation, like
 // unset leaves it on; a set-but-empty Diagnostics row is a different cache input.
 static const char *const k_sig_env[] = {
-    // SPIR-V optimisation (runtime/nvn/vulkan/shaders.c stage_opt)
-    "LARECOMP_VK_OPT", "XCDE_FS_OPT",
-    // translator switches that change the emitted GLSL (runtime/nvn/maxwell/translate.c)
+    // SPIR-V optimisation and cache modes (runtime/nvn/vulkan/shaders.c stage_opt / pack_open / vk_glsl_to_spirv)
+    "LARECOMP_VK_OPT", "XCDE_FS_OPT", "XCDE_SPIRV_LOOSE", "LARECOMP_VK_NO_SPIRV_CACHE",
+    // translator switches that change the emitted GLSL (runtime/nvn/maxwell/translate.c). SAVE_MSL also adds source
+    // annotations (and writes build/glsl), so it changes the translated source/cache key rather than only logging.
     "XCDE_STATIC_STACKS", "XCDE_RSC_PIXEL", "XCDE_D16_REF", "XCDE_SCALED_GATHER", "LARECOMP_NO_DISCARD",
-    "XCDE_HW_FP16", "XCDE_EARLY_FS", "XCDE_STRUCTURED_CFG",
+    "XCDE_HW_FP16", "XCDE_EARLY_FS", "XCDE_STRUCTURED_CFG", "LARECOMP_SAVE_MSL",
+    // replacement GLSL, source patches and hand-edited stage overrides (runtime/nvn/vulkan/exec.c compile_program)
+    "XCDE_BLOOM_PREFILTER", "XCDE_BLOOM_FILTER", "XCDE_GTAO", "XCDE_CHAR_LIGHT", "XCDE_TMAA_TEXEL",
+    "XCDE_GLSL_DIR",
+    // pipeline/layout policy and artifacts reached by vk_precompile_program / vk_precompile_variant (device.c / exec.c /
+    // textures.c: LARECOMP_VK_D24 selects the depth format used when a recorded pipeline is rebuilt)
+    "LARECOMP_VK_GPL", "XCDE_VK_GPL", "XCDE_PUSH_DESC", "XCDE_CANON", "XCDE_GPL_RETAIN", "LARECOMP_VK_D24",
     // the passes this run would execute (runtime/nvn/vulkan/precompile.c)
     "XCDE_PRECOMPILE_LIBS", "XCDE_PRECOMPILE_PIPELINES",
     NULL};
-// (the AMD-integrated-GPU auto-off of the whole-pipeline pass is device-dependent and stays out: the pass policy for the
-// current machine is not knowable without a Vulkan device, which --precompile-status deliberately never opens)
+// Runtime-only pipeline selection (XCDE_GPL_OPTIMIZE, XCDE_GPL_DET, XCDE_PREWARM_WHOLE, XCDE_PREBUILD_LIBS,
+// XCDE_PRELINK, XCDE_WHOLE_BATCH) stays out: the offline path always warms the shader libraries and whole optimized
+// pipelines; those switches choose how the running game consumes or prewarms them. Execution/reporting controls
+// (XCDE_PRECOMPILE_FORCE/THREADS/STALL_S/LIST and crash tests) and trace/log/debug-dump switches do not change successful
+// shader/pipeline artifact contents. The AMD-integrated-GPU auto-off of the whole-pipeline pass is device-dependent and
+// stays out: the pass policy for the current machine is not knowable without a Vulkan device, which --precompile-status
+// deliberately never opens.
 
 bool vk_precompile_sig(const char *root, char out[17]) {
     RootInfo ri;

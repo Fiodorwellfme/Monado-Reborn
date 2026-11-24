@@ -2587,7 +2587,8 @@ static void translate_program(void *arg) {
     p->t_x0 = SDL_GetTicksNS();
     xlat_lock();
     p->t_xl = SDL_GetTicksNS();
-    static int trace_tr = -1;  // [XCDE] XCDE_TRACE_TRANSLATE=1: start / end of every translation (finds a translation that never ends)
+    // [XCDE] XCDE_TRACE_TRANSLATE=1: start / end of every translation (finds a translation that never ends).
+    static _Thread_local int trace_tr = -1;  // [XCDE] T281: precompile workers bypass xlat_lock
     if (trace_tr < 0) trace_tr = getenv("XCDE_TRACE_TRANSLATE") != NULL;
     if (trace_tr) LOG("[xlat] begin vs=%llx fs=%llx""%c", (unsigned long long)p->code[0], (unsigned long long)p->code[1], 10);
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->src[0], p->cmax[0], STAGE_VERTEX, &p->vkey);

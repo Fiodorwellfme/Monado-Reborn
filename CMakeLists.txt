@@ -117,14 +117,17 @@ set_source_files_properties(runtime/nvn/smaa_data.c PROPERTIES OBJECT_DEPENDS "$
 
 # [XCDE] T282: the shader precompile fingerprint (tools/build/shader_sig.py). cache/precompile_done.txt stores it, and
 # `<game> --precompile-status` compares it with the sources to tell an unrelated rebuild from one that can change the
-# precompiled shaders (the launcher's JUGAR check and RecompLauncher's builder). Generated when any of the translator /
-# SPIR-V compiler sources changes; only runtime/nvn/vulkan/precompile_sig.c includes it. The translator folder is
-# globbed recursively (a new helper header or subfolder there is a fingerprint input too), and directories are dropped
-# from the DEPENDS list.
+# precompiled shaders (the launcher's JUGAR check and RecompLauncher's builder). Generated when any of the game-file
+# discovery, translator, replacement-GLSL or SPIR-V compiler sources changes; only runtime/nvn/vulkan/precompile_sig.c
+# includes it. The translator folder is globbed recursively (a new helper header or subfolder there is a fingerprint input
+# too), and directories are dropped from the DEPENDS list. Do not glob every Vulkan header: exec.c's unrelated rendering
+# headers change for gameplay work and are covered by XCDE_PRECOMPILE_ARTIFACTS_REV when the build path changes.
 file(GLOB_RECURSE SHADER_SIG_SOURCES CONFIGURE_DEPENDS
      "${ROOT}/runtime/nvn/maxwell/*" "${ROOT}/runtime/nvn/vulkan/shaders.c" "${ROOT}/runtime/nvn/vulkan/shaders.h"
      "${ROOT}/runtime/nvn/vulkan/vk.h" "${ROOT}/runtime/nvn/vulkan/precompile.c" "${ROOT}/runtime/nvn/objects.c"
-     "${ROOT}/runtime/cache_validation.h")
+     "${ROOT}/runtime/cache_validation.h" "${ROOT}/runtime/services/game_files.c" "${ROOT}/runtime/services/game_files.h"
+     "${ROOT}/runtime/nvn/vulkan/bloom_prefilter.h" "${ROOT}/runtime/nvn/vulkan/bloom.h"
+     "${ROOT}/runtime/nvn/vulkan/gtao.h")
 foreach(_sig_source IN LISTS SHADER_SIG_SOURCES)
   if(IS_DIRECTORY "${_sig_source}")
     list(REMOVE_ITEM SHADER_SIG_SOURCES "${_sig_source}")

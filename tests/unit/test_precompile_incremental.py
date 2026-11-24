@@ -28,7 +28,9 @@ class ShaderSig(unittest.TestCase):
         names = shader_sig.sources()
         for name in ('runtime/nvn/maxwell/translate.c', 'runtime/nvn/vulkan/shaders.c',
                      'runtime/nvn/vulkan/precompile.c', 'runtime/nvn/objects.c',
-                     'runtime/cache_validation.h', 'tools/build/shader_sig.py'):
+                     'runtime/cache_validation.h', 'runtime/services/game_files.c', 'runtime/services/game_files.h',
+                     'runtime/nvn/vulkan/bloom_prefilter.h', 'runtime/nvn/vulkan/bloom.h',
+                     'runtime/nvn/vulkan/gtao.h', 'tools/build/shader_sig.py'):
             self.assertIn(name, names)
 
     def test_the_script_prints_the_same_fingerprint(self):
@@ -50,6 +52,14 @@ class ShaderSig(unittest.TestCase):
                 'runtime/nvn/vulkan/shaders.h': 'header',
                 'runtime/nvn/vulkan/vk.h': 'vulkan',
                 'runtime/nvn/vulkan/precompile.c': 'guesses',
+                'runtime/nvn/objects.c': 'content hash',
+                'runtime/cache_validation.h': 'acceptance',
+                'runtime/services/game_files.c': 'game files',
+                'runtime/services/game_files.h': 'game files header',
+                'runtime/nvn/vulkan/bloom_prefilter.h': 'bloom prefilter GLSL',
+                'runtime/nvn/vulkan/bloom.h': 'bloom GLSL',
+                'runtime/nvn/vulkan/gtao.h': 'GTAO GLSL',
+                'tools/build/shader_sig.py': 'fingerprint script',
             }
             for rel, text in inputs.items():
                 path = root / rel
@@ -57,8 +67,13 @@ class ShaderSig(unittest.TestCase):
                 path.write_text(text, encoding='utf-8')
             first = shader_sig.fingerprint(root)
             self.assertEqual(first, shader_sig.fingerprint(root))
-            (root / 'runtime/nvn/maxwell/translate.c').write_text('translator, fixed', encoding='utf-8')
-            self.assertNotEqual(first, shader_sig.fingerprint(root))
+            for rel, text in inputs.items():
+                with self.subTest(source=rel):
+                    path = root / rel
+                    path.write_text(text + ', fixed', encoding='utf-8')
+                    self.assertNotEqual(first, shader_sig.fingerprint(root))
+                    path.write_text(text, encoding='utf-8')
+                    self.assertEqual(first, shader_sig.fingerprint(root))
             added = root / 'runtime/nvn/maxwell' / 'new_helper.h'
             added.write_text('helper', encoding='utf-8')
             changed = shader_sig.fingerprint(root)
@@ -76,14 +91,14 @@ class ShaderSig(unittest.TestCase):
 class RuntimeContracts(unittest.TestCase):
     def test_the_done_stamp_records_the_inputs_not_the_executable(self):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
-        self.assertIn('fprintf(f, "sig %s%c", sig, 10);', precompile)
+        self.assertIn('fprintf(f, "sig %s%c", sig, 10)', precompile)
         self.assertNotIn('stamp_exe', precompile)
         self.assertNotIn('exe %lld %lld', precompile)
 
     def test_the_status_answer_does_not_scan_or_open_vulkan(self):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
         start = precompile.index('int vk_precompile_status(const char *root) {')
-        block = precompile[start:precompile.index('int vk_precompile_main(const char *root) {')]
+        block = precompile[start:precompile.index('static int start_threads(', start)]
         self.assertIn('vk_precompile_sig(root, sig)', block)
         for expensive in ('ui_window_init', 'gf_init', 'list_dir', 'scan_file', 'pthread_create'):
             self.assertNotIn(expensive, block)
@@ -95,7 +110,9 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn('precompile_current(sig)', body)
         self.assertIn('XCDE_PRECOMPILE_FORCE', body)
         # [review] the stamp is removed only once the root was validated: a wrong root must not throw it away.
-        self.assertLess(precompile.index('gf_init(root', start), precompile.index('remove("cache/precompile_done.txt")', start))
+        remove_done = precompile.index('remove_precompile_file("cache/precompile_done.txt")', start)
+        self.assertLess(precompile.index('gf_init(root', start), remove_done)
+        self.assertLess(precompile.index('ui_window_init();', start), remove_done)
 
     def test_the_found_shaders_input_masks_are_initialized(self):
         # found[] comes from realloc: a shader that no container named had a garbage int_in/named, so the build made
@@ -110,10 +127,105 @@ class RuntimeContracts(unittest.TestCase):
         # starts during it copies a partial mask, so each run translated a different set of variants.
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
         body = precompile[precompile.index('int vk_precompile_main(const char *root) {'):]
-        scan_joined = body.index('for (int i = 0; i < nscanners; i++) pthread_join(sc[i], NULL);')
-        worker_started = body.index('pthread_create(&th[i], NULL, worker, NULL)')
+        scan_joined = body.index('for (int i = 0; i < nscan_started; i++) pthread_join(sc[i], NULL);')
+        worker_started = body.index('start_threads(th, nthreads, worker, "build")')
         self.assertLess(scan_joined, worker_started)
         self.assertNotIn('nworkers0', body)
+
+    def test_windows_cache_sizes_are_64_bit_and_regular_files_only(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        helper = precompile[precompile.index('static bool cache_file_size('):precompile.index('static bool cache_file_nonempty(')]
+        for contract in ('xcde_utf8_to_wide', 'CreateFileW', 'GetFileSizeEx', 'GetFileInformationByHandle',
+                         'FILE_ATTRIBUTE_DIRECTORY', 'S_ISREG'):
+            self.assertIn(contract, helper)
+        current = precompile[precompile.index('static bool precompile_current('):precompile.index('static bool remove_precompile_file(')]
+        self.assertNotIn('stat("cache/spirv', current)
+
+    def test_forced_cleanup_is_checked_and_ordered_after_initialization(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        start = precompile.index('int vk_precompile_main(')
+        root_ready = precompile.index('gf_init(root', start)
+        vulkan_ready = precompile.index('ui_window_init();', start)
+        done = precompile.index('remove_precompile_file("cache/precompile_done.txt")', start)
+        forced = precompile.index('if (forced) {', done)
+        inflight = precompile.index('remove_precompile_file("cache/precompile_inflight.bin")', forced)
+        skip = precompile.index('remove_precompile_file("cache/precompile_skip.txt")', forced)
+        opened = precompile.index('inflight_open();', forced)
+        self.assertLess(root_ready, vulkan_ready)
+        self.assertLess(vulkan_ready, done)  # a failed device init keeps the valid stamp too
+        self.assertLess(done, forced)
+        self.assertLess(inflight, skip)  # a failed in-flight delete must not discard the skip list first
+        self.assertLess(skip, opened)
+        remover = precompile[precompile.index('static bool remove_precompile_file('):precompile.index('static bool write_sig_stamp(')]
+        self.assertIn('xcde_utf8_remove(path)', remover)
+        self.assertIn('errno == ENOENT', remover)
+        self.assertIn('return false', remover)
+
+    def test_scan_budgets_bound_sources_and_decompressed_blocks_separately(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        budget = precompile[precompile.index('static void scan_budget_enter('):precompile.index('static void scan_budget_leave(')]
+        self.assertIn('(slot_limited && b->inflight >= b->slots)', budget)
+        self.assertIn('b->inflight > 0', budget)  # always admit one oversized item, so waiting cannot deadlock
+        self.assertIn('b->bytes > b->limit - size', budget)
+        scan = precompile[precompile.index('static void scan_file('):precompile.index('// files that hold shaders')]
+        source_enter = scan.index('scan_budget_enter(&source_budget, src.size, src.size > (64ull << 20))')
+        self.assertLess(source_enter, scan.index('gf_pread(&src, d, src.size, 0)'))
+        self.assertLess(scan.index('scan_budget_enter(&xbc1_budget, dsz, true)'), scan.index('malloc(dsz)'))
+        main = precompile[precompile.index('int vk_precompile_main('):]
+        self.assertIn('scanner_cap_for_ram(ram)', main)
+        self.assertNotIn('nscanners > source_budget.slots', main)  # small files retain their I/O overlap on 8 GB
+
+    def test_incidental_xbc1_magic_is_not_a_hard_failure(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        header = precompile[precompile.index('static bool xbc1_header('):precompile.index('static void scan_file(')]
+        self.assertIn('rd32(d + i + 4) != 1', header)
+        self.assertIn('c < 0x20 || c == 0x7f', header)
+        scan = precompile[precompile.index('static void scan_file('):precompile.index('// files that hold shaders')]
+        self.assertIn('!xbc1_header(d, i)', scan)
+        self.assertIn('scan_failure(path, why)', scan)  # recognized blocks with bad bounds/zlib still fail the run
+
+    def test_thread_phases_check_creation_and_join_only_started_threads(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        self.assertEqual(precompile.count('pthread_create('), 1)
+        helper = precompile[precompile.index('static int start_threads('):precompile.index('int vk_precompile_main(')]
+        self.assertIn('int err = pthread_create', helper)
+        self.assertIn('if (!started)', helper)
+        self.assertIn('_exit(2)', helper)
+        main = precompile[precompile.index('int vk_precompile_main('):]
+        self.assertNotIn('pthread_create(', main)
+        for phase in ('scanner, "scan"', 'worker, "build"', 'seed_worker, "seed"', 'var_worker, "pipelines"'):
+            self.assertIn(phase, main)
+        for started in ('nscan_started', 'nbuild_started', 'nseed_started', 'npipe_started'):
+            self.assertIn(f'i < {started}', main)
+
+    def test_incomplete_work_cannot_write_a_current_stamp(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        seed = precompile[precompile.index('static void *seed_worker('):precompile.index('static bool stalled(')]
+        self.assertIn('&n_seed_failed', seed)
+        main = precompile[precompile.index('int vk_precompile_main('):]
+        finish = main.index('pass_save_times();')
+        failed = main.index('if (scan_failed || n_failed || seed_failed || n_var_failed)', finish)
+        stamped = main.index('write_done_stamp(sig, secs)', failed)
+        self.assertLess(failed, stamped)
+        self.assertIn('no current cache stamp was written', main[failed:stamped])
+        self.assertIn('_exit(1)', main[failed:stamped])
+
+    def test_cache_completion_is_mode_aware(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        current = precompile[precompile.index('static bool precompile_current('):precompile.index('static bool remove_precompile_file(')]
+        self.assertIn('spirv_persistence_disabled()', current)
+        self.assertIn('spirv_loose_mode()', current)
+        self.assertIn('cache/precompile_loose_done.txt', current)
+        self.assertIn('cache_has_loose_spv()', current)
+        self.assertIn('cache/spirv.pack', current)
+        self.assertIn('cache/spirv.idx', current)
+        main = precompile[precompile.index('int vk_precompile_main('):]
+        self.assertIn('remove_precompile_file("cache/precompile_loose_done.txt")', main)
+        disabled = main.rindex('if (spirv_persistence_disabled()) {')
+        stamped = main.index('write_done_stamp(sig, secs)', disabled)
+        self.assertLess(disabled, stamped)
+        self.assertIn('_exit(0)', main[disabled:stamped])
+        self.assertIn('write_sig_stamp("cache/precompile_loose_done.txt", sig)', main[stamped:])
 
     def test_the_signature_unit_takes_the_build_header_or_a_native_define(self):
         signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
@@ -121,6 +233,24 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn('#ifndef XCDE_SHADER_SIG', signature)
         self.assertIn('.nup', signature)  # (a package is one file: its size and time)
         self.assertIn('cache/variants.bin', signature)  # (documented as deliberately not covered)
+
+    def test_the_signature_allowlist_covers_artifact_inputs(self):
+        signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
+        start = signature.index('static const char *const k_sig_env[] = {')
+        allowlist = signature[start:signature.index('NULL};', start)]
+        for name in ('LARECOMP_VK_OPT', 'XCDE_FS_OPT', 'XCDE_SPIRV_LOOSE', 'LARECOMP_VK_NO_SPIRV_CACHE',
+                     'XCDE_STATIC_STACKS', 'XCDE_RSC_PIXEL', 'XCDE_D16_REF', 'XCDE_SCALED_GATHER',
+                     'LARECOMP_NO_DISCARD', 'XCDE_HW_FP16', 'XCDE_EARLY_FS', 'XCDE_STRUCTURED_CFG',
+                     'LARECOMP_SAVE_MSL', 'XCDE_BLOOM_PREFILTER', 'XCDE_BLOOM_FILTER', 'XCDE_GTAO',
+                     'XCDE_CHAR_LIGHT', 'XCDE_TMAA_TEXEL', 'XCDE_GLSL_DIR', 'LARECOMP_VK_GPL', 'XCDE_VK_GPL',
+                     'XCDE_PUSH_DESC', 'XCDE_CANON', 'XCDE_GPL_RETAIN', 'LARECOMP_VK_D24', 'XCDE_PRECOMPILE_LIBS',
+                     'XCDE_PRECOMPILE_PIPELINES'):
+            self.assertIn(f'"{name}"', allowlist)
+        # These are deliberately not cache inputs: runtime-only pipeline selection, run control, or diagnostics.
+        for name in ('XCDE_GPL_OPTIMIZE', 'XCDE_GPL_DET', 'XCDE_PREWARM_WHOLE', 'XCDE_PREBUILD_LIBS',
+                     'XCDE_PRECOMPILE_FORCE', 'XCDE_PRECOMPILE_THREADS', 'XCDE_TRACE_TRANSLATE'):
+            self.assertNotIn(f'"{name}"', allowlist)
+        self.assertIn('Runtime-only pipeline selection', signature)  # (the exclusions are documented at the allowlist)
 
     def test_the_status_mode_is_wired_into_the_entry_point(self):
         main = (ROOT / 'runtime/host/main_boot.c').read_text(encoding='utf-8')
@@ -132,7 +262,8 @@ class RuntimeContracts(unittest.TestCase):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
         self.assertIn('nscanners > 64', precompile)  # (sc[] is 64: >128-CPU machines must not overflow it)
         self.assertIn('cache/spirv.idx', precompile)  # (a current cache needs the pack's index too)
-        forced = precompile[precompile.index('if (forced) {'):precompile.index('t_run = t0;')]
+        forced = precompile[precompile.index('if (forced) {', precompile.index('int vk_precompile_main(')):
+                          precompile.index('inflight_open();', precompile.index('int vk_precompile_main('))]
         self.assertIn('cache/precompile_skip.txt', forced)
         self.assertIn('cache/precompile_inflight.bin', forced)
         signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
@@ -153,7 +284,7 @@ class BuilderAndLauncherContracts(unittest.TestCase):
 
     def test_the_status_is_memoized_and_dropped_when_the_inputs_can_change(self):
         launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
-        self.assertIn('if (g_pc_current < 0) {', launcher)
+        self.assertIn('if (g_pc_current < 0 || (force && g_pc_current != PC_STATUS_CURRENT)) {', launcher)
         self.assertIn('int status = pc_status_now();', launcher)
         # [XCDE] T282 review: a rebuilt executable drops the memo (the base code stat'ed it every call), and the probe
         # asks with the Diagnostics-tab environment the signature hashes.
@@ -173,7 +304,7 @@ class BuilderAndLauncherContracts(unittest.TestCase):
         # [XCDE] T282 review: the button passes XCDE_PRECOMPILE_FORCE=1 to its child instead of deleting the done stamp,
         # so a spawn that fails cannot throw away a valid cache; the runtime clears the crash/in-flight lists itself.
         launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
-        start = launcher[launcher.index('static void pc_start(bool then_play, bool fresh = false) {'):
+        start = launcher[launcher.index('static bool pc_start(bool then_play, bool fresh = false) {'):
                          launcher.index('static void pc_stop() {')]
         self.assertIn('PcForce force(fresh)', start)
         self.assertNotIn('precompile_done.txt', start)
@@ -189,6 +320,15 @@ class BuilderAndLauncherContracts(unittest.TestCase):
 
 
 class BuildContracts(unittest.TestCase):
+    def test_cmake_fingerprint_dependencies_cover_the_artifact_sources(self):
+        cmake = (ROOT / 'CMakeLists.txt').read_text(encoding='utf-8')
+        start = cmake.index('file(GLOB_RECURSE SHADER_SIG_SOURCES CONFIGURE_DEPENDS')
+        dependencies = cmake[start:cmake.index('add_custom_command(OUTPUT "${GEN_INC}/shader_sig.h"', start)]
+        for name in ('runtime/services/game_files.c', 'runtime/services/game_files.h',
+                     'runtime/nvn/vulkan/bloom_prefilter.h', 'runtime/nvn/vulkan/bloom.h',
+                     'runtime/nvn/vulkan/gtao.h'):
+            self.assertIn(f'"${{ROOT}}/{name}"', dependencies)
+
     def test_every_build_path_generates_the_fingerprint_header(self):
         cmake = (ROOT / 'CMakeLists.txt').read_text(encoding='utf-8')
         self.assertIn('vulkan/precompile_sig', cmake)
