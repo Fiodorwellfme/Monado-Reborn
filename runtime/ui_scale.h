@@ -111,6 +111,12 @@ static inline bool ui_scale_group_anchor(UiScaleGroup *g, const float box[4], fl
     if (g->valid && box[0] <= g->box[2] + m && box[2] >= g->box[0] - m && box[1] <= g->box[3] + m && box[3] >= g->box[1] - m) {
         g->box[0] = fminf(g->box[0], box[0]); g->box[1] = fminf(g->box[1], box[1]);
         g->box[2] = fmaxf(g->box[2], box[2]); g->box[3] = fmaxf(g->box[3], box[3]);
+        bool now_scaled = ui_scale_hud_group_(g->box, w, h);
+        if (!g->scaled && now_scaled) {
+            if (ui_scale_anchor(g->box, w, h, &g->ax, &g->ay)) g->scaled = true;
+        } else if (g->scaled && !now_scaled) {
+            g->scaled = false;
+        }
     } else {
         if (!ui_scale_anchor(box, w, h, &g->ax, &g->ay)) return false;
         g->valid = true;
@@ -144,6 +150,8 @@ typedef struct {
     bool was_world;  // (the element it continues was one)
     uint8_t moves;   // its moves over the last frames (bit 0: this one)
     float dx, dy;    // its move since the last frame
+    bool scaled;     // this frame's decision (for later draws in the same frame)
+    float ax, ay;
 } UiScaleItem;
 typedef struct {
     float box[4];
@@ -164,7 +172,23 @@ typedef struct {
     UiScaleGroup chain;
     bool bubble;     // the draws since a speech bubble's panel (ui_scale_frame_anchor) are the bubble's
     float bx, by;    // that panel's point
+    bool dlg;        // GitHub #241: a non-cutscene bottom dialogue speaker bar was seen this frame
+    bool dlg_prev;   // ...or last frame (the "A" icon and dialogue text draw before the bar)
 } UiScaleFrame;
+
+// GitHub #241: non-cutscene gameplay dialogue lays out its speaker name (y ~491..543), speaker name bar (y ~535..574,
+// 426x39 px), Line 1 (y ~563..612), Line 2 (y ~563..661) and "A" button (y ~657..715) across the bottom of the 1280x720
+// frame. Line 1 sits above the 10% bottom edge band (y > 648), so the dialogue stayed at 100% for 1-2 s until Line 2
+// wrapped into the band and then shrank to (w/2, h). Detecting the speaker bar anchors the whole dialogue at (w/2, h)
+// from its very first frame.
+static inline bool ui_scale_is_dlg_bar_(const float b[4], float w, float h) {
+    float bw = b[2] - b[0], bh = b[3] - b[1];
+    return b[1] >= 0.72f * h && b[1] <= 0.77f * h && b[3] >= 0.77f * h && b[3] <= 0.82f * h &&
+           bw >= 0.25f * w && bw <= 0.45f * w && bh >= 0.03f * h && bh <= 0.08f * h;
+}
+static inline bool ui_scale_in_dlg_(const float b[4], float w, float h) {
+    return b[1] >= 0.65f * h && b[3] <= h + 0.02f * h && b[0] < 0.88f * w;
+}
 
 // GitHub #153: the area a speech bubble's pieces lie in, from its panel's point (the panel is drawn at its top-left
 // corner, a bit left of it: the line text, the name and its bar, the tail, an icon past the right end). Measured at
@@ -265,6 +289,8 @@ static inline void ui_scale_frame_begin(UiScaleFrame *f, float w, float h) {
     f->ncur = 0;
     f->chain.valid = false;
     f->bubble = false;
+    f->dlg_prev = f->dlg;
+    f->dlg = false;
 }
 
 // this draw's anchor; false: not scaled (away from the frame's edges, a marker, a window, or it covers the frame)
@@ -283,6 +309,17 @@ static inline bool ui_scale_frame_anchor(UiScaleFrame *f, const float box[4], fl
         if (ui_scale_in_bubble_(box, f->bx, f->by, w, h)) return false;
         f->bubble = false;
     }
+    // GitHub #241: non-cutscene bottom dialogue (speaker bar + speaker name + Line 1/2 text + "A" icon) scales
+    // immediately around bottom-center (w/2, h) from frame 1 instead of staying at 100% until Line 2 wraps.
+    if (ui_scale_is_dlg_bar_(box, w, h)) {
+        f->dlg = true;
+        *ax = w * 0.5f; *ay = h;
+        return true;
+    }
+    if ((f->dlg || f->dlg_prev) && ui_scale_in_dlg_(box, w, h)) {
+        *ax = w * 0.5f; *ay = h;
+        return true;
+    }
     // the last frame's element this one continues: the same box, else the one it overlaps most - at least half of the
     // larger area (2 px of slack for thin pieces): an element that was not drawn last frame (hint text blinking out for
     // a frame) took the state of a marker it merely touched
@@ -297,40 +334,120 @@ static inline bool ui_scale_frame_anchor(UiScaleFrame *f, const float box[4], fl
         float d = ui_scale_overlap_(ga, pg) / fmaxf(area, (pg[2] - pg[0]) * (pg[3] - pg[1]));
         if (d > bd) { bd = d; best = i; }
     }
+    // GitHub #241: typewriter / growing dialogue text (same top-left or top-center origin, growing right/down) can
+    // double in width or height in one frame (d <= 0.5). Keep its continuation from the previous frame so it does not
+    // drop back to 100% mid-line or on line wrap.
+    if (best < 0) {
+        float best_pa = 0;
+        float bh = box[3] - box[1];
+        for (int i = 0; i < f->nprev; i++) {
+            if (f->prev[i].world) continue;
+            const float *pb = f->prev[i].box;
+            float ph = pb[3] - pb[1];
+            if (fabsf(box[1] - pb[1]) > 2.0f) continue;
+            bool same_left = fabsf(box[0] - pb[0]) <= 2.0f;
+            bool same_cx = fabsf(cx - 0.5f * (pb[0] + pb[2])) <= 2.0f;
+            if (!same_left && !same_cx) continue;
+            if (box[0] > pb[0] + 2.0f || box[2] < pb[2] - 2.0f || box[3] < pb[3] - 2.0f) continue;
+            if (bh > fmaxf(3.5f * ph, ph + 0.12f * h)) continue;
+            float pg[4] = {pb[0] - 2, pb[1] - 2, pb[2] + 2, pb[3] + 2};
+            float pa = (pg[2] - pg[0]) * (pg[3] - pg[1]);
+            if (pa > best_pa && ui_scale_overlap_(ga, pg) >= 0.85f * pa) { best_pa = pa; best = i; }
+        }
+    }
     const UiScalePrev *p = best >= 0 ? &f->prev[best] : NULL;
     float dx = p ? cx - 0.5f * (p->box[0] + p->box[2]) : 0, dy = p ? cy - 0.5f * (p->box[1] + p->box[3]) : 0;
+    bool band = ui_scale_in_band_(box, w, h);
+    int cur_idx = -1;
     if (f->ncur < UI_SCALE_MAX_ITEMS) {
-        UiScaleItem *c = &f->cur[f->ncur++];
+        cur_idx = f->ncur++;
+        UiScaleItem *c = &f->cur[cur_idx];
         for (int k = 0; k < 4; k++) c->box[k] = box[k];
         c->match = best; c->still = still; c->dx = dx; c->dy = dy;
         // moved, same size: a marker in the world
         bool moved = p && !still && fabsf((box[2] - box[0]) - (p->box[2] - p->box[0])) < 0.5f &&
                      fabsf((box[3] - box[1]) - (p->box[3] - p->box[1])) < 0.5f && (fabsf(dx) > 0.2f || fabsf(dy) > 0.2f);
         // (in the edge band it is the HUD's: the party list slides in at a battle's start; a marker there is rare)
-        bool band = box[0] < w * UI_SCALE_EDGE || box[2] > w * (1 - UI_SCALE_EDGE) ||
-                    box[1] < h * UI_SCALE_EDGE || box[3] > h * (1 - UI_SCALE_EDGE);
         c->moves = (uint8_t)((p ? p->moves << 1 : 0) | moved);
         int nm = 0;
         for (int k = 0; k < 6; k++) nm += (c->moves >> k) & 1;
         c->was_world = p && p->world;
         c->world = (c->was_world || nm >= UI_SCALE_MOVES) && !band;
+        c->scaled = false; c->ax = 0; c->ay = 0;
     }
+    bool res = false;
     if (p) {  // (an anchor in the element's own place moves with it)
-        if (!p->scaled) return false;
-        *ax = p->ax + (p->inx ? dx : 0);
-        *ay = p->ay + (p->iny ? dy : 0);
-        return true;
+        if (p->scaled) {
+            *ax = p->ax + (p->inx ? dx : 0);
+            *ay = p->ay + (p->iny ? dy : 0);
+            res = true;
+        }
+    } else {
+        // just appeared: inside a HUD element of the last frame -> its anchor
+        float box_area = (box[2] - box[0]) * (box[3] - box[1]);
+        float bestin = 0.6f * box_area;
+        int in = -1;
+        for (int i = 0; i < f->nprev; i++) {
+            if (f->prev[i].world) continue;
+            float ov = ui_scale_overlap_(box, f->prev[i].box);
+            if (ov > bestin) { bestin = ov; in = i; }
+        }
+        if (in >= 0) {
+            if (f->prev[in].scaled) { *ax = f->prev[in].ax; *ay = f->prev[in].ay; res = true; }
+        } else {
+            // GitHub #241: inside an element drawn earlier in the same frame (e.g. a dialogue panel and its text
+            // appearing together, even when unrelated draws sit between them and reset f->chain)
+            int prev_cur = cur_idx >= 0 ? cur_idx : f->ncur;
+            float best_cur = 0.6f * box_area;
+            int in_cur = -1;
+            for (int i = 0; i < prev_cur; i++) {
+                if (f->cur[i].world) continue;
+                float ov = ui_scale_overlap_(box, f->cur[i].box);
+                if (ov > best_cur) { best_cur = ov; in_cur = i; }
+            }
+            if (in_cur >= 0) {
+                if (f->cur[in_cur].scaled) { *ax = f->cur[in_cur].ax; *ay = f->cur[in_cur].ay; res = true; }
+            } else {
+                // GitHub #241: adjacent (within the frame-grouping margin) to an already-scaled HUD element from last
+                // frame or earlier in this frame -> scale immediately on frame 1 instead of popping from 100% on frame 2
+                float m_edge = h * 0.065f, m_mid = h * 0.017f;
+                int near_p = -1;
+                for (int i = 0; i < f->nprev; i++) {
+                    if (f->prev[i].world || !f->prev[i].scaled) continue;
+                    const float *pb = f->prev[i].box;
+                    float mg = (band && ui_scale_in_band_(pb, w, h)) ? m_edge : m_mid;
+                    if (!ui_scale_near_(box, pb, mg)) continue;
+                    float u[4] = {fminf(box[0], pb[0]), fminf(box[1], pb[1]), fmaxf(box[2], pb[2]), fmaxf(box[3], pb[3])};
+                    if (!ui_scale_hud_group_(u, w, h)) continue;
+                    near_p = i; break;
+                }
+                if (near_p >= 0) {
+                    *ax = f->prev[near_p].ax; *ay = f->prev[near_p].ay; res = true;
+                } else {
+                    int near_c = -1;
+                    for (int i = 0; i < prev_cur; i++) {
+                        if (f->cur[i].world || !f->cur[i].scaled) continue;
+                        const float *cb = f->cur[i].box;
+                        float mg = (band && ui_scale_in_band_(cb, w, h)) ? m_edge : m_mid;
+                        if (!ui_scale_near_(box, cb, mg)) continue;
+                        float u[4] = {fminf(box[0], cb[0]), fminf(box[1], cb[1]), fmaxf(box[2], cb[2]), fmaxf(box[3], cb[3])};
+                        if (!ui_scale_hud_group_(u, w, h)) continue;
+                        near_c = i; break;
+                    }
+                    if (near_c >= 0) {
+                        *ax = f->cur[near_c].ax; *ay = f->cur[near_c].ay; res = true;
+                    } else {
+                        res = ui_scale_group_anchor(&f->chain, box, w, h, ax, ay);
+                    }
+                }
+            }
+        }
     }
-    // just appeared: inside a HUD element of the last frame -> its anchor
-    float bestin = 0.6f * (box[2] - box[0]) * (box[3] - box[1]);
-    int in = -1;
-    for (int i = 0; i < f->nprev; i++) {
-        if (f->prev[i].world) continue;
-        float ov = ui_scale_overlap_(box, f->prev[i].box);
-        if (ov > bestin) { bestin = ov; in = i; }
+    if (cur_idx >= 0) {
+        f->cur[cur_idx].scaled = res;
+        if (res) { f->cur[cur_idx].ax = *ax; f->cur[cur_idx].ay = *ay; }
     }
-    if (in >= 0) { if (!f->prev[in].scaled) return false; *ax = f->prev[in].ax; *ay = f->prev[in].ay; return true; }
-    return ui_scale_group_anchor(&f->chain, box, w, h, ax, ay);
+    return res;
 }
 
 // Fold "scale by s around (ax, ay) in window pixels" into the draw's guest -> window mapping X = gx * sx + ox.
