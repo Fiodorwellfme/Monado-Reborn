@@ -1501,6 +1501,11 @@ void vk_exec_init(void) {
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
     st_defaults();
+    // [XCDE] Pre-allocate 2 transient chunks at init so mid-gameplay upload spikes never stall on a 64 MB vmaCreateBuffer.
+    if (g_vk.vma && !nchunks) {
+        new_chunk(CHUNK_SIZE);
+        new_chunk(CHUNK_SIZE);
+    }
 }
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);
@@ -3514,17 +3519,23 @@ static void lib_evict(uint64_t now, uint64_t min_age) {
     }
 }
 
-static void pipe_evict(void) {  // (render thread)
+static void pipe_evict(void) {  // (render thread, post-present)
     if (pe_ndead) {
         uint64_t done = vk_completed_seq();
         size_t k = 0;
+        int destroyed = 0;
+        const int max_destroy = 16;  // [XCDE] incremental pipeline destroy to prevent frame hitches
         for (size_t i = 0; i < pe_ndead; i++)
-            if (pe_dead[i].seq <= done) { vkDestroyPipeline(g_vk.dev, pe_dead[i].p, NULL); libs_release(pe_dead[i].libs); }
-            else pe_dead[k++] = pe_dead[i];
+            if (pe_dead[i].seq <= done && destroyed < max_destroy) {
+                vkDestroyPipeline(g_vk.dev, pe_dead[i].p, NULL);
+                libs_release(pe_dead[i].libs);
+                destroyed++;
+            } else pe_dead[k++] = pe_dead[i];
         pe_ndead = k;
     }
     static int budget = -1, min_age;
-    static uint64_t next;
+    static uint64_t next, next_budget_check;
+    static bool mem_pressure;
     if (budget < 0) {
         const char *e = getenv("XCDE_PIPE_BUDGET"), *a = getenv("XCDE_PIPE_MIN_AGE");
         int ram = SDL_GetSystemRAM();  // (MB)
@@ -3551,15 +3562,18 @@ static void pipe_evict(void) {  // (render thread)
         Pipe *pp = pipe_tab.e[i].val;
         if (pp && atomic_load(&pp->state) != 3) pipe_live++;
     }
-    int effective_budget = budget;
-    VmaBudget heaps[VK_MAX_MEMORY_HEAPS];
-    VkPhysicalDeviceMemoryProperties memory;
-    vmaGetHeapBudgets(g_vk.vma, heaps);
-    memory = g_vk.memory_props;
-    for (uint32_t i = 0; i < memory.memoryHeapCount && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU; ++i)  // [PERF-V5] not on UMA iGPUs
-        if (heaps[i].budget && heaps[i].usage > heaps[i].budget - heaps[i].budget / 10) {
-            effective_budget = budget * 3 / 4; break;
-        }
+    if (now >= next_budget_check && g_vk.props.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+        next_budget_check = now + 240;  // [XCDE] throttle driver memory-budget ioctl (~4 s at 60 fps)
+        VmaBudget heaps[VK_MAX_MEMORY_HEAPS];
+        VkPhysicalDeviceMemoryProperties memory = g_vk.memory_props;
+        vmaGetHeapBudgets(g_vk.vma, heaps);
+        mem_pressure = false;
+        for (uint32_t i = 0; i < memory.memoryHeapCount; ++i)
+            if (heaps[i].budget && heaps[i].usage > heaps[i].budget - heaps[i].budget / 10) {
+                mem_pressure = true; break;
+            }
+    }
+    int effective_budget = mem_pressure ? (budget * 3 / 4) : budget;
     if (effective_budget < 1) effective_budget = 1;
     if (pipe_live <= (uint32_t)effective_budget) return;
     Pipe **c = malloc(pipe_live * sizeof *c);
@@ -3599,15 +3613,19 @@ static void pipe_evict(void) {  // (render thread)
     }
 }
 
-static void gpl_reap(void) {  // (render thread)
+static void gpl_reap(void) {  // (render thread, post-present)
     if (!__atomic_load_n(&gpl_ndead, __ATOMIC_RELAXED)) return;
     uint64_t done = vk_completed_seq(), pend = vk_pending_seq();
     pthread_mutex_lock(&gpl_lock);
-    int k = 0;
+    int k = 0, destroyed = 0;
+    const int max_destroy = 16;  // [XCDE] incremental pipeline destroy to prevent frame hitches
     for (int i = 0; i < gpl_ndead; i++) {
         if (!gpl_dead[i].seq) gpl_dead[i].seq = pend;  // draws recorded until now may still use it
-        if (gpl_dead[i].seq <= done) { vkDestroyPipeline(g_vk.dev, gpl_dead[i].p, NULL); libs_release(gpl_dead[i].libs); }
-        else gpl_dead[k++] = gpl_dead[i];
+        if (gpl_dead[i].seq <= done && destroyed < max_destroy) {
+            vkDestroyPipeline(g_vk.dev, gpl_dead[i].p, NULL);
+            libs_release(gpl_dead[i].libs);
+            destroyed++;
+        } else gpl_dead[k++] = gpl_dead[i];
     }
     gpl_ndead = k;
     pthread_mutex_unlock(&gpl_lock);
@@ -4129,6 +4147,10 @@ static void prewarm_drain(void) {  // (render thread, start of each draw)
     prewarm_pump();
 }
 
+void vk_frame_maintenance(void) {  // [XCDE] post-present per-frame maintenance (out of per-draw hot path)
+    prewarm_drain();
+}
+
 // [XCDE] T240: a loading frame waits for the build work. The game registers an area's / a scene's programs on its
 // loading screen or black transition, and their prewarm (libraries, prelinked pipelines, T163 / T212 / T218) ran on
 // while the scene started: its first draws then waited for pipelines one by one on the render thread - and Shulk's
@@ -4146,18 +4168,19 @@ void vk_prewarm_hold(uint64_t frame_draws) {
         max_ms = e ? atoi(e) : 8000;
     }
     // a scene that starts without a loading screen (a cutscene, a new character or model set appearing) registers a
-    // burst of programs between two frames: the next frame waits too (XCDE_REG_HOLD=<programs>, default 16; at most
-    // XCDE_REG_HOLD_MS, default 3000) - between frames, never inside one (a draw waiting for its pipeline in the middle
-    // of a frame is when hair / faces / a weapon came out wrong, T240)
-    static int reg_min = -1, reg_ms;
+    // burst of programs between two frames: only hold cutscenes (or explicit XCDE_REG_HOLD) so field exploration /
+    // movement never stalls for up to 3 s waiting on speculative background prewarm jobs.
+    static int reg_min = -1, reg_ms, reg_forced;
     if (reg_min < 0) {
         const char *e = getenv("XCDE_REG_HOLD");
+        reg_forced = e != NULL;
         reg_min = e ? atoi(e) : 16;
         e = getenv("XCDE_REG_HOLD_MS");
         reg_ms = e ? atoi(e) : 3000;
     }
+    extern bool xcde_in_cutscene(void);
     int burst = atomic_exchange(&g_reg_burst, 0);
-    bool reg_hold = reg_min > 0 && burst >= reg_min && reg_ms > 0;
+    bool reg_hold = reg_min > 0 && burst >= reg_min && reg_ms > 0 && (reg_forced || xcde_in_cutscene());
     if (!max_ms || sync_shaders() || (frame_draws > (uint64_t)max_draws && !reg_hold)) return;
     int lim = frame_draws > (uint64_t)max_draws && reg_ms < max_ms ? reg_ms : max_ms;
     uint64_t t0 = SDL_GetTicksNS(), dl = t0 + (uint64_t)lim * 1000000ull;
@@ -5834,11 +5857,9 @@ static XfbShadow *xsh_written(uint64_t base, uint64_t size, uint64_t at, uint64_
         if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &s->buf, &s->mem, NULL) != VK_SUCCESS) return NULL;
         s->base = base; s->size = size;
         nxsh++;
-        xsh_copy(s, cb, base, size);  // (whole: parts not written this frame hold what the heap holds)
+        xsh_copy(s, cb, base, size);  // (whole: already includes [at, at + n) written to gmem_buf)
         LOG("[vk] transform feedback mirror %llx +%llu in device memory\n", (unsigned long long)base, (unsigned long long)size);
         xsh_count(&xsh_n_made, "made");
-        if (at + n > base + size) n = base + size - at;
-        xsh_copy(s, cb, at, n);
         return s;
     }
     if (at + n > base + size) n = base + size - at;
@@ -7013,7 +7034,6 @@ static bool menu_stage_draw(void) {
 static void draw_(CmdRec *r, bool indexed) {
     cliff_batch_pending.draws = 1;  // [XCDE] T-CLIFF-BATCH
     if (prof) prof_tp_ = SDL_GetTicksNS();
-    prewarm_drain();  // [XCDE] T163
     if (!st.program) { SKIPPED(); return; }
     if (!r->x[2] || (indexed ? !r->x[6] : !r->x[4])) return;
     {   // [XCDE] debugging: XCDE_SKIP_PROG=<fragment code addr hex>: drop the draws of that program

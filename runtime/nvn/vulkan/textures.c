@@ -394,16 +394,19 @@ static int ndead, cap_dead;
 static void views_forget(TexBackend *b);
 
 void vk_collect_dead(void) {
+    if (!ndead) return;
     uint64_t done = vk_completed_seq();
-    int k = 0;
+    int k = 0, destroyed = 0;
+    const int max_destroy = 32;  // [XCDE] spread deferred destroys across submits to avoid movement/unload stutters
     for (int i = 0; i < ndead; i++) {
-        if (dead[i].seq > done) { dead[k++] = dead[i]; continue; }
+        if (dead[i].seq > done || destroyed >= max_destroy) { dead[k++] = dead[i]; continue; }
         if (dead[i].view) vkDestroyImageView(g_vk.dev, dead[i].view, NULL);
         else if (dead[i].buf) {
             if (dead[i].raw_mem) { vkDestroyBuffer(g_vk.dev, dead[i].buf, NULL); vkFreeMemory(g_vk.dev, dead[i].raw_mem, NULL); }
             else vmaDestroyBuffer(g_vk.vma, dead[i].buf, dead[i].mem);
         }
         else vmaDestroyImage(g_vk.vma, dead[i].img, dead[i].mem);
+        destroyed++;
     }
     ndead = k;
 }

@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #define XCDE_DESC_BINDINGS 96
-#define XCDE_DESC_SLOTS 64
+#define XCDE_DESC_SLOTS 512
 typedef struct { uint64_t word[4]; } XcdeDescriptorKey;
 typedef struct {
     uint64_t sequence, layout, handle;
