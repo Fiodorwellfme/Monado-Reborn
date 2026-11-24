@@ -77,6 +77,41 @@ int main(void) {
     assert(xcde_early_limiter_step(&lim, t_switch + 20000000ull, 0) == 0);
     assert(lim.next_deadline_ns == 0 && lim.last_fps == 0);
 
-    puts("fps limiter: custom FPS bounds/parsing and early fixed-cadence pacing OK");
+    // Hybrid present-aligned pacer: flat present-to-present cadence despite moving work-time variance
+    XcdePresentPacer pp = {0};
+    uint64_t pt = 2000000000ull;  // 2.0 s
+    // Frame 0: initial anchor (no start wait), work = 5 ms -> waits until pt + p60
+    assert(xcde_present_pacer_frame_start(&pp, pt, 60) == 0);
+    uint64_t p0 = xcde_present_pacer_before_present(&pp, pt + 5000000ull, 60);
+    assert(p0 == pt + p60);
+
+    // Frame 1 (moving: work jumps 5 ms -> 9 ms): starts late, presents at exact p0 + p60
+    uint64_t s1 = xcde_present_pacer_frame_start(&pp, p0 + 30000ull, 60);
+    assert(s1 > p0 && s1 < p0 + p60);  // starts late for low input latency
+    uint64_t p1 = xcde_present_pacer_before_present(&pp, s1 + 9000000ull, 60);
+    // If s1 + 9 ms < p0 + p60, p1 hits exact p0 + p60; otherwise re-anchors cleanly
+    uint64_t prev_p = p1 ? p1 : (s1 + 9000000ull);
+    // Subsequent frames with 5..9 ms fluctuating work must hit exact p60 intervals (0 jitter)
+    uint64_t works[4] = {6000000ull, 9000000ull, 5000000ull, 8500000ull};
+    for (int i = 0; i < 4; i++) {
+        uint64_t s = xcde_present_pacer_frame_start(&pp, prev_p + 30000ull, 60);
+        uint64_t start_actual = s ? s : (prev_p + 30000ull);
+        uint64_t pres = xcde_present_pacer_before_present(&pp, start_actual + works[i], 60);
+        assert(pres == prev_p + p60);
+        prev_p = pres;
+    }
+
+    // GPU-bound frame (work = 20 ms > p60): 0 wait and clean re-anchor (no burst catch-up)
+    uint64_t sb = xcde_present_pacer_frame_start(&pp, prev_p + 30000ull, 60);
+    uint64_t sb_act = sb ? sb : (prev_p + 30000ull);
+    uint64_t slow_now = sb_act + 20000000ull;
+    assert(xcde_present_pacer_before_present(&pp, slow_now, 60) == 0);
+    assert(pp.next_present_ns == slow_now + p60);
+
+    // Unlimited (0) resets pacer
+    assert(xcde_present_pacer_frame_start(&pp, slow_now + 1000000ull, 0) == 0);
+    assert(pp.next_present_ns == 0 && pp.work_count == 0);
+
+    puts("fps limiter: custom FPS bounds/parsing, early limiter, and present-aligned pacer OK");
     return 0;
 }

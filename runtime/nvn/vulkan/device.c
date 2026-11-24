@@ -722,18 +722,21 @@ void vk_pipeline_cache_save(void) {
 
 // ================================================================== swapchain
 static bool g_vsync_fifo;  // FIFO chosen by the V-Sync option (backend_present's repeat presents)
+bool vk_vsync_fifo_active(void) { return g_vsync_fifo; }
+float vk_display_hz(void);
 static VkPresentModeKHR g_present_mode_cur = VK_PRESENT_MODE_FIFO_KHR;  // (the last one chosen: overlay)
 static VkPresentModeKHR present_mode(void) {
     // MAILBOX by default: the game paces itself (vi.c's emulated 60 Hz vsync), and with FIFO every submission
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
-    // [XCDE] V-Sync option (xcde.ini vsync = 1, the default; FPS 30 / 60): FIFO. The game's limiter aims at 0.997 x the
-    // period (~60.2 fps), which on the Switch the display holds to its vblanks; with mailbox nothing did, so against a
-    // 59.99x Hz monitor some frames were shown twice and others never, at a steady "60 fps" in the counters (the user:
-    // feels laggy, frametime flat). FIFO shows each frame once. Above 60 / unlimited: mailbox (FIFO would cap it).
+    // [XCDE] V-Sync option (xcde.ini vsync = 1, the default): FIFO whenever the FPS target fits the display's refresh
+    // rate (e.g. <= 60 on 60 Hz, <= 120 on 120 Hz, <= 144 on 144 Hz). Above the display refresh or unlimited: mailbox
+    // (FIFO would cap it).
     const char *e = getenv("LARECOMP_VK_PRESENT");
-    bool vs = !e && g_settings.vsync && g_settings.fps > 0 && g_settings.fps <= 60 && !getenv("XCDE_FPS_PERIOD_SCALE") &&
+    float hz = vk_display_hz();
+    int vs_cap = hz > 60.5f ? (int)lroundf(hz) : 60;
+    bool vs = !e && g_settings.vsync && g_settings.fps > 0 && g_settings.fps <= vs_cap && !getenv("XCDE_FPS_PERIOD_SCALE") &&
               (!getenv("LARECOMP_HIDDEN") || getenv("XCDE_VSYNC_TEST")) && !diag_deterministic();  // (test runs: as before)
     if (vs) e = "fifo";
     { static int logged; if (!logged++) LOG("[vk] present mode %s%s\n", e ? e : "mailbox", vs ? " (V-Sync option)" : ""); }
@@ -908,9 +911,11 @@ static volatile bool sc_dirty;  // [XCDE] the F1 menu changed V-Sync: a new swap
 void vk_request_swapchain_recreate(void) { sc_dirty = true; }
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
-    {   // [XCDE] live FPS option (F1): crossing 60 changes the V-Sync present mode (FIFO only at 30 / 60)
+    {   // [XCDE] live FPS option (F1): crossing the display refresh changes the V-Sync present mode
         static int band = -1;
-        int b = g_settings.fps > 0 && g_settings.fps <= 60;
+        float hz = vk_display_hz();
+        int vs_cap = hz > 60.5f ? (int)lroundf(hz) : 60;
+        int b = g_settings.fps > 0 && g_settings.fps <= vs_cap;
         if (band >= 0 && b != band && g_settings.vsync) sc_dirty = true;
         band = b;
     }
@@ -990,6 +995,7 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+static bool g_repeat_present_active;
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -1007,6 +1013,10 @@ void vk_frame_end(const char *shot_path) {
     if (!done_sem[img]) done_sem[img] = binary_semaphore();
     uint64_t seq = vk_pending_seq();
     vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
+    if (!g_repeat_present_active) {
+        extern void xcde_present_pace_wait(void);
+        xcde_present_pace_wait();
+    }
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     extern void vk_rq_at(const char *where);
@@ -1545,13 +1555,19 @@ void backend_present(NvnTexture *t) {
             vk_present_redraw(vk_cmd());
             vkq_drain();
             menu_render((void *)vk_cmd(), g_vk.sc_extent.width, g_vk.sc_extent.height);
+            g_repeat_present_active = true;
             vk_frame_end(NULL);
+            g_repeat_present_active = false;
         }
         extern void vk_gmem_check(uint64_t frame);
         vk_gmem_check(total_frames + 1);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
+    }
+    {   // [XCDE] post-present per-frame maintenance (prewarm drain, incremental pipeline eviction/reap)
+        extern void vk_frame_maintenance(void);
+        vk_frame_maintenance();
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
     if (aspect_changed) tmp_reset_history();

@@ -82,6 +82,93 @@ static inline uint64_t xcde_early_limiter_step(XcdeEarlyLimiter *lim, uint64_t n
     return 0;
 }
 
+// Hybrid present-aligned pacer (zero frame lag / 0 extra frames in flight):
+// - Paces frame start to (next_present_ns - lead_ns) so input is polled as late as possible.
+// - Absorbs frame-to-frame work-time variance (e.g. moving vs standing still) right before
+//   vkQueuePresentKHR so present-to-present intervals stay flat without adding a queued frame.
+// - When GPU/CPU-bound (work >= period), waits 0 ns and re-anchors cleanly without burst catch-up.
+enum { XCDE_PACER_WINDOW = 16 };
+typedef struct {
+    uint64_t next_present_ns;
+    uint64_t frame_start_ns;
+    uint64_t work_hist[XCDE_PACER_WINDOW];
+    uint32_t work_idx;
+    uint32_t work_count;
+    int last_fps;
+} XcdePresentPacer;
+
+static inline void xcde_present_pacer_reset(XcdePresentPacer *p) {
+    memset(p, 0, sizeof *p);
+}
+
+static inline uint64_t xcde_present_pacer_lead_ns(const XcdePresentPacer *p, uint64_t period_ns) {
+    if (!p->work_count) return period_ns / 2;
+    uint64_t max_work = 0;
+    for (uint32_t i = 0; i < p->work_count; i++)
+        if (p->work_hist[i] > max_work) max_work = p->work_hist[i];
+    uint64_t lead = max_work + 1000000ull;  // +1.0 ms headroom for sudden movement/draw spikes
+    uint64_t min_lead = period_ns / 4;
+    if (lead < min_lead) lead = min_lead;
+    if (lead > period_ns) lead = period_ns;
+    return lead;
+}
+
+static inline uint64_t xcde_present_pacer_frame_start(XcdePresentPacer *p, uint64_t now_ns, int target_fps) {
+    if (target_fps <= 0) {
+        xcde_present_pacer_reset(p);
+        return 0;
+    }
+    uint64_t period_ns = xcde_fps_period_ns(target_fps);
+    if (!p->next_present_ns || p->last_fps != target_fps) {
+        xcde_present_pacer_reset(p);
+        p->last_fps = target_fps;
+        p->frame_start_ns = now_ns;
+        p->next_present_ns = now_ns + period_ns;
+        return 0;
+    }
+    if (now_ns >= p->next_present_ns) {
+        p->frame_start_ns = now_ns;
+        p->next_present_ns = now_ns + period_ns;
+        return 0;
+    }
+    uint64_t lead_ns = xcde_present_pacer_lead_ns(p, period_ns);
+    uint64_t start_target = p->next_present_ns > lead_ns ? p->next_present_ns - lead_ns : 0;
+    if (now_ns < start_target) {
+        p->frame_start_ns = start_target;
+        return start_target;
+    }
+    p->frame_start_ns = now_ns;
+    return 0;
+}
+
+static inline uint64_t xcde_present_pacer_before_present(XcdePresentPacer *p, uint64_t now_ns, int target_fps) {
+    if (target_fps <= 0) {
+        xcde_present_pacer_reset(p);
+        return 0;
+    }
+    uint64_t period_ns = xcde_fps_period_ns(target_fps);
+    if (p->frame_start_ns && now_ns >= p->frame_start_ns) {
+        uint64_t work_ns = now_ns - p->frame_start_ns;
+        if (work_ns < 250000000ull) {
+            p->work_hist[p->work_idx] = work_ns;
+            p->work_idx = (p->work_idx + 1) % XCDE_PACER_WINDOW;
+            if (p->work_count < XCDE_PACER_WINDOW) p->work_count++;
+        }
+    }
+    if (!p->next_present_ns || p->last_fps != target_fps) {
+        p->last_fps = target_fps;
+        p->next_present_ns = now_ns + period_ns;
+        return 0;
+    }
+    if (now_ns < p->next_present_ns) {
+        uint64_t wake_ns = p->next_present_ns;
+        p->next_present_ns += period_ns;
+        return wake_ns;
+    }
+    p->next_present_ns = now_ns + period_ns;
+    return 0;
+}
+
 #ifdef __cplusplus
 }
 #endif

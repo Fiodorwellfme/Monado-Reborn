@@ -11,6 +11,7 @@
 //   LARECOMP_FRAME_STEPS_MAX maximum steps per frame (default 4: after a long stall the game doesn't jump ahead)
 //   LARECOMP_FORCE_STEPS=<n> (test) always n
 #include <math.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,7 +30,15 @@ static XcdeFrameClock xcde_clock;
 uint64_t xcde_frame_now_ns(void) { return kernel_det() ? kernel_vnow(0) : plat_now_ns(); }
 uint32_t xcde_frame_threshold_current(uint32_t n) { return xcde_frame_threshold(&xcde_clock, n); }
 static XcdeEarlyLimiter early_lim;
-RT_ON_RESET(xcde_clock_reset) { memset(&xcde_clock, 0, sizeof xcde_clock); xcde_early_limiter_reset(&early_lim); }
+static XcdePresentPacer present_pacer;
+static pthread_mutex_t present_pacer_lock = PTHREAD_MUTEX_INITIALIZER;
+RT_ON_RESET(xcde_clock_reset) {
+    memset(&xcde_clock, 0, sizeof xcde_clock);
+    xcde_early_limiter_reset(&early_lim);
+    pthread_mutex_lock(&present_pacer_lock);
+    xcde_present_pacer_reset(&present_pacer);
+    pthread_mutex_unlock(&present_pacer_lock);
+}
 
 extern volatile uint64_t g_vsync_count;  // runtime/hle/vi.c
 uint64_t g_frame_steps_late;             // (stats) frames that advanced more than one step
@@ -156,21 +165,66 @@ static inline void early_spin_pause(void) {
 #endif
 }
 
+static bool present_pace_enabled(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("XCDE_PRESENT_PACE");
+        on = !e || atoi(e) != 0;
+    }
+    if (!on || !early_limiter_active()) return false;
+    extern bool vk_vsync_fifo_active(void);
+    extern bool tmp_fg_active(void);
+    if (vk_vsync_fifo_active() || tmp_fg_active()) return false;
+    return xcde_present_fps() > 0;
+}
+
+static void pace_sleep_until(uint64_t wake, uint64_t now, bool bg_cap) {
+    const uint64_t spin_margin_ns = bg_cap ? 2000000ull : 1000000ull;  // sleep until 1.0 ms before deadline, then spin for sub-50 us precision
+    if (wake > now + spin_margin_ns) plat_sleep_until_ns(wake - spin_margin_ns);
+    if (!bg_cap) while (plat_now_ns() < wake) early_spin_pause();
+}
+
+// [XCDE] Called from device.c right after vk_submit_extra() and before vkQueuePresentKHR() on the primary present.
+// Absorbs frame-to-frame work-time variance (standing still vs moving) so present-to-present frametimes stay flat
+// without ever adding a queued frame of lag.
+void xcde_present_pace_wait(void) {
+    extern bool xcde_window_focused(void);
+    bool bg_cap = !diag_deterministic() && g_settings.bg_fps > 0 && !xcde_window_focused();
+    if (bg_cap || !present_pace_enabled()) return;
+    int target = xcde_present_fps();
+    uint64_t now = plat_now_ns();
+    pthread_mutex_lock(&present_pacer_lock);
+    uint64_t wake = xcde_present_pacer_before_present(&present_pacer, now, target);
+    pthread_mutex_unlock(&present_pacer_lock);
+    if (wake) pace_sleep_until(wake, now, false);
+}
+
 static void early_limiter_pace(void) {
     extern bool xcde_window_focused(void);
     bool bg_cap = !diag_deterministic() && g_settings.bg_fps > 0 && !xcde_window_focused();
     if (!bg_cap && !early_limiter_active()) {
         xcde_early_limiter_reset(&early_lim);
+        pthread_mutex_lock(&present_pacer_lock);
+        xcde_present_pacer_reset(&present_pacer);
+        pthread_mutex_unlock(&present_pacer_lock);
         return;
     }
     int target = xcde_present_fps();
     if (bg_cap && (target <= 0 || g_settings.bg_fps < target)) target = g_settings.bg_fps;
     uint64_t now = plat_now_ns();
+    if (!bg_cap && present_pace_enabled()) {
+        xcde_early_limiter_reset(&early_lim);
+        pthread_mutex_lock(&present_pacer_lock);
+        uint64_t wake = xcde_present_pacer_frame_start(&present_pacer, now, target);
+        pthread_mutex_unlock(&present_pacer_lock);
+        if (!wake) return;
+        pace_sleep_until(wake, now, false);
+        g_limiter_slept_ns += plat_now_ns() - now;
+        return;
+    }
     uint64_t wake = xcde_early_limiter_step(&early_lim, now, target);
     if (!wake) return;
-    const uint64_t spin_margin_ns = bg_cap ? 2000000ull : 1000000ull;  // sleep until 1.0 ms before deadline, then spin for sub-50 us precision
-    if (wake > now + spin_margin_ns) plat_sleep_until_ns(wake - spin_margin_ns);
-    if (!bg_cap) while (plat_now_ns() < wake) early_spin_pause();
+    pace_sleep_until(wake, now, bg_cap);
     g_limiter_slept_ns += plat_now_ns() - now;
 }
 
