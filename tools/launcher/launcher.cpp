@@ -745,7 +745,7 @@ static void load() {
         else if (!strcmp(k, "session_fix")) g.session_fix = !strcmp(v, "on") ? 1 : !strcmp(v, "off") ? 0 : -1;
         else if (!strcmp(k, "rumble")) g.rumble = atoi(v) != 0;
         else if (gfx_load_key(&g.graphics, k, v)) {}  // [XCDE]
-        else if (!strcmp(k, "gpu_preset")) { g.quality_preset=xcde_quality_parse(v); g.gpu_performance=g.quality_preset==QUALITY_PERFORMANCE || g.quality_preset==QUALITY_POTATO; }
+        else if (!strcmp(k, "gpu_preset")) { g.quality_preset=xcde_quality_parse(v); g.gpu_performance=xcde_quality_is_performance(g.quality_preset); }
         else if (!strcmp(k, "low_memory")) g.gpu_performance=atoi(v)!=0;
         else if (!strcmp(k, "dynamic_min_height")) g.dynamic_min_height=std::clamp(atoi(v),0,4320);
         else if (!strcmp(k, "dynamic_max_height")) g.dynamic_max_height=std::clamp(atoi(v),0,4320);
@@ -1737,9 +1737,10 @@ static Settings quality_settings() {
     v.res_mode=resolutions[std::clamp(g.res,0,7)]; v.upscaler=upscalers[std::clamp(g.upscaler,0,4)];
     v.upscaler_auto=g.upscaler_auto; v.antialias=g.smaa ? AA_SMAA : AA_OFF;
     v.upscale_quality=g.uquality;
-    v.dof_off=!g.dof; v.game_blur=g.game_blur; v.frame_gen=g.frame_gen;
+    v.dof_off=!g.dof; v.game_blur=g.game_blur; v.taa_off=!g.taa; v.frame_gen=g.frame_gen;
     v.dynamic_min_height=g.dynamic_min_height; v.dynamic_max_height=g.dynamic_max_height;
-    v.effects_off=g.effects_off; v.fps=xcde_fps_clamp(g.fps); v.fps_limiter=xcde_fps_limiter_valid(g.fps_limiter);
+    v.effects_off=g.effects_off; v.grass_lod=grass_lod_valid(g.grass_lod); v.graphics=g.graphics;
+    v.fps=xcde_fps_clamp(g.fps); v.fps_limiter=xcde_fps_limiter_valid(g.fps_limiter);
     v.cutscene_mode=g.cut_fg ? 2 : g.cutscenes ? 1 : 0; return v;
 }
 static void quality_from_settings(const Settings &v) {
@@ -1751,8 +1752,9 @@ static void quality_from_settings(const Settings &v) {
     g.quality_preset=v.quality_preset; g.gpu_performance=v.gpu_performance;
     g.upscaler_auto=v.upscaler_auto; g.smaa=v.antialias==AA_SMAA;
     g.uquality=v.upscale_quality;
-    g.dof=!v.dof_off; g.game_blur=v.game_blur; g.frame_gen=v.frame_gen;
+    g.dof=!v.dof_off; g.game_blur=v.game_blur; g.taa=!v.taa_off; g.frame_gen=v.frame_gen;
     g.dynamic_min_height=v.dynamic_min_height; g.dynamic_max_height=v.dynamic_max_height; g.effects_off=v.effects_off;
+    g.grass_lod=grass_lod_valid(v.grass_lod); g.graphics=v.graphics;
     g.cut_fg=v.cutscene_mode==2; g.cutscenes=v.cutscene_mode ? 1 : 0;
 }
 // ------------------------------------------------------------------ GitHub #119: update check
@@ -2464,7 +2466,7 @@ static void tab_graphics() {
     if (g.quality_preset==preset_before && !xcde_quality_equal(before,xcde_quality_current(&editable))) g.quality_preset=QUALITY_CUSTOM;
     if (ImGui::Button(g.ui_lang ? "Restore graphics" : "Restaurar gráficos")) {
         xcde_quality_apply(&editable,QUALITY_BALANCED); quality_from_settings(editable);
-        g.graphics = gfx_defaults();  // (back to defaults: full-res shadow mask, everything else Original)
+        g.sharpness = -1.0f;
     }
 
 }

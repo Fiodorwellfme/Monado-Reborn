@@ -360,7 +360,11 @@ static void ui(void) {
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem(T("Gráficos"))) {
             const bool en = g_settings.ui_lang != 0;
-            monado_quality_controls(&g_settings,en);
+            if (monado_quality_controls(&g_settings,en)) {
+                if (g_settings.upscaler_auto && dlss_available()) g_settings.upscaler = UPSCALE_DLSS;
+                xcde_graphics_publish(&g_settings.graphics);
+                xcde_foliage_set_preset(g_settings.grass_lod);
+            }
             quality_before=g_settings;
             ImGui::SeparatorText(T("Pantalla"));
             if (ImGui::Checkbox(T("Pantalla completa"), &g_settings.fullscreen)) want_window = true;
@@ -455,7 +459,10 @@ static void ui(void) {
             for (int i = 0; i < nups; i++) if (upv[i] == g_settings.upscaler) ui_ = i;
             const char *preview = g_settings.upscaler_auto ? (g_settings.ui_lang ? "Automatic (DLSS on supported RTX)" : "Automático (DLSS en RTX compatible)") : T(ups[ui_]);
             if (monado_begin_combo(T("Escalado / antialiasing"), preview)) {
-                if (ImGui::Selectable(g_settings.ui_lang ? "Automatic (restart)" : "Automático (reiniciar)", g_settings.upscaler_auto)) g_settings.upscaler_auto = true;
+                if (ImGui::Selectable(g_settings.ui_lang ? "Automatic (restart)" : "Automático (reiniciar)", g_settings.upscaler_auto)) {
+                    g_settings.upscaler_auto = true;
+                    if (dlss_available()) g_settings.upscaler = UPSCALE_DLSS;
+                }
                 for (int i = 0; i < nups; ++i) {
                     bool unavailable = i == 3 && !dlss_available();
                     ImGui::BeginDisabled(unavailable);
@@ -475,7 +482,7 @@ static void ui(void) {
                     if (ImGui::SmallButton(g_settings.ui_lang ? "Default" : "Predeterminada")) g_settings.upscale_sharpness = -1.0f;
                 }
             }
-            if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DLSS || g_settings.upscaler == UPSCALE_FSR4_LITE) {
+            if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DLSS || g_settings.upscaler == UPSCALE_FSR4_LITE || (g_settings.upscaler_auto && dlss_available())) {
                 static const char *uq[] = {"Nativo (solo antialiasing)", "Calidad (67 %)", "Equilibrado (59 %)", "Rendimiento (50 %)",
                                            "Ultra rendimiento (33 %)"};
                 monado_combo(T("Calidad del escalado"), &g_settings.upscale_quality, TL(uq, 5).p, 5);
@@ -576,8 +583,12 @@ static void ui(void) {
                                                : "Limita los FPS cuando la ventana está en segundo plano para reducir la carga.");
             }
             if (ImGui::Button(g_settings.ui_lang ? "Restore graphics" : "Restaurar gráficos")) {
-                xcde_quality_apply(&g_settings,QUALITY_BALANCED); quality_before=g_settings;
-                g_settings.graphics = gfx_defaults(); xcde_graphics_publish(&g_settings.graphics);
+                xcde_quality_apply(&g_settings,QUALITY_BALANCED);
+                if (g_settings.upscaler_auto && dlss_available()) g_settings.upscaler = UPSCALE_DLSS;
+                g_settings.upscale_sharpness = -1.0f;
+                xcde_graphics_publish(&g_settings.graphics);
+                xcde_foliage_set_preset(g_settings.grass_lod);
+                quality_before=g_settings;
             }
             ImGui::EndTabItem();
         }

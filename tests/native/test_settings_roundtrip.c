@@ -84,9 +84,9 @@ int main(int argc, char **argv) {
     g_settings.cheat_high_jump = false; g_settings.camera_follow_jump = false; settings_load();
     assert(g_settings.fps_overlay_style == FPS_OVERLAY_SIMPLE);  // [XCDE] GitHub #39
     assert(g_settings.gpu_uuid[0] && g_settings.gpu_index == 1 && g_settings.stick_deadzone == 0);
-    assert(g_settings.grass_lod == GRASS_ULTRA);  // [XCDE] GitHub #171: legacy extreme migrates and round-trips as ultra
+    assert(g_settings.grass_lod == GRASS_LOW);  // [XCDE] Potato sets Low grass
     assert(g_settings.vulkan_api == 12 && !g_settings.fps_overlay && !g_settings.upscaler_auto);
-    assert(g_settings.quality_preset==QUALITY_POTATO && g_settings.gpu_performance);
+    assert(g_settings.quality_preset==QUALITY_POTATO && g_settings.gpu_performance && g_settings.taa_off);
     assert(g_settings.dynamic_min_height==360 && g_settings.dynamic_max_height==540);
     // [XCDE] Monado II cheats round-trip through the file, with the out-of-range multiplier written as 1x
     assert(g_settings.cheat_damage_dealt && g_settings.cheat_damage_dealt_percent == 250);
@@ -95,8 +95,17 @@ int main(int argc, char **argv) {
     assert(g_settings.cheat_high_jump);  // [XCDE] T276 round-trips through cheat_high_jump
     assert(g_settings.camera_follow_jump);  // [XCDE] T276 round-trips through camera_follow_jump
     // [XCDE] the old effect checkbox mask folds into the graphics choices at load (graphics_options.h)
-    // (GFX_AO is 1 from the effects_off = 1 written above: #130's AO migration, now part of the general fold)
     assert(!g_settings.effects_off && g_settings.graphics.value[GFX_REFLECTIONS]==1 && g_settings.graphics.value[GFX_AO]==1);
+    // [XCDE] Quality & Handheld presets round-trip cleanly
+    xcde_quality_apply(&g_settings, QUALITY_QUALITY); settings_save();
+    xcde_quality_apply(&g_settings, QUALITY_BALANCED); settings_load();
+    assert(g_settings.quality_preset == QUALITY_QUALITY && !g_settings.gpu_performance);
+    assert(g_settings.grass_lod == GRASS_ULTRA && g_settings.antialias == AA_OFF && g_settings.upscale_quality == UQ_NATIVE);
+    assert(g_settings.graphics.value[GFX_SHADOW_MAPS] == 1 && g_settings.graphics.value[GFX_PROP_LOD] == 3 && g_settings.graphics.value[GFX_FILTERING] == 4);
+    xcde_quality_apply(&g_settings, QUALITY_HANDHELD); settings_save();
+    xcde_quality_apply(&g_settings, QUALITY_BALANCED); settings_load();
+    assert(g_settings.quality_preset == QUALITY_HANDHELD && g_settings.gpu_performance);
+    assert(g_settings.upscaler == UPSCALE_FSR3 && g_settings.grass_lod == GRASS_ORIGINAL && g_settings.graphics.value[GFX_FILTERING] == 3);
     char data[8192] = {0}; f = fopen(argv[1], "r"); assert(f);
     assert(fread(data, 1, sizeof data - 1, f)); fclose(f);
     assert(strstr(data, "future_plugin = preserve this"));
