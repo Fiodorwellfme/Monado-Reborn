@@ -614,7 +614,11 @@ void plat_print_backtrace(void) {
     for (int i = 0; i < n; i++) {
         uint64_t pc = (uint64_t)(uintptr_t)bt[i], off = 0;
         const char *s = plat_symbol(pc, &off);
-        if (!s) s = rt_host_fn_name(pc, &off);
+        if (!s || !strcmp(s, "lasgame.dll")) {
+            uint64_t fn_off = 0;
+            const char *g = rt_host_fn_name(pc, &fn_off);
+            if (g) { s = g; off = fn_off; }
+        }
         if (s) rt_logf("  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
         else rt_logf("  #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc,
                      (unsigned long long)(pc - exe));
