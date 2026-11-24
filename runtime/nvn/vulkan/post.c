@@ -228,7 +228,9 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     uint32_t ow = (uint32_t)lround(ow_d), oh = (uint32_t)lround(oh_d);
     if (ow > 16384) ow = 16384;
     if (oh > 16384) oh = 16384;
-    bool fsr = g_settings.upscaler == UPSCALE_FSR1 && (ow > b->width + 1 || oh > b->height + 1);  // (an upscale only)
+    bool tmp_on = tmp_enabled();
+    bool fsr = (g_settings.upscaler == UPSCALE_FSR1 || (!tmp_on && g_settings.upscaler == UPSCALE_FSR3)) &&
+               (ow > b->width + 1 || oh > b->height + 1);  // (an upscale only; FSR 3 falls back to FSR 1 when unavailable)
     bool upscaled = false;  // [XCDE] v12 #29: v is already at the output size (the SMAA below then runs at ow x oh)
     // [XCDE] v12 #29: XCDE_SMAA_AFTER_UPSCALE=0 restores the behaviour before the change (no SMAA under FSR 3 / DLSS,
     // SMAA at the render resolution under FSR 1), so a tester can A/B without rebuilding.
@@ -236,7 +238,7 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, double ow_d, 
     if (smaa_after < 0) { const char *e = getenv("XCDE_SMAA_AFTER_UPSCALE"); smaa_after = e ? atoi(e) != 0 : 1; }
     extern void vk_frame_suspend(void);
     extern void vk_frame_resume(void);
-    if (tmp_enabled()) {  // [XCDE] FSR 3 / DLSS (temporal.c); without this frame's camera: FSR 1 as the upscaler
+    if (tmp_on) {  // [XCDE] FSR 3 / DLSS (temporal.c); without this frame's camera: FSR 1 as the upscaler
         const TmpCamera *tmp_cam = NULL;
         uint64_t tmp_frame = ~0ull;
         TexBackend *tmp_depth = NULL;

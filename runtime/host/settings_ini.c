@@ -139,7 +139,7 @@ void settings_load(void) {
         else if (!strcmp(k, "fps_overlay_style")) g_settings.fps_overlay_style = !strcmp(v, "simple") ? FPS_OVERLAY_SIMPLE : FPS_OVERLAY_DETAILED;
         else if (!strcmp(k, "fps_overlay_scale")) g_settings.fps_overlay_scale = perf_overlay_scale_percent(atoi(v));  // GitHub #147
         else if (!strcmp(k, "fps_overlay_position")) g_settings.fps_overlay_pos = perf_overlay_pos_parse(v);
-        else if (!strcmp(k, "gpu_preset")) { g_settings.quality_preset = xcde_quality_parse(v); g_settings.gpu_performance = g_settings.quality_preset == QUALITY_PERFORMANCE || g_settings.quality_preset == QUALITY_POTATO; }
+        else if (!strcmp(k, "gpu_preset")) { g_settings.quality_preset = xcde_quality_parse(v); g_settings.gpu_performance = xcde_quality_is_performance(g_settings.quality_preset); }
         else if (!strcmp(k, "low_memory")) g_settings.gpu_performance = atoi(v) != 0;
         else if (!strcmp(k, "dynamic_min_height")) g_settings.dynamic_min_height = atoi(v);
         else if (!strcmp(k, "dynamic_max_height")) g_settings.dynamic_max_height = atoi(v);
