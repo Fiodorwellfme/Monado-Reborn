@@ -186,6 +186,71 @@ int main(void) {
     frame(sb + 3, 1, sbx, sby); frame(sb + 3, 1, sbx, sby);
     assert(sc[0]);
 
+    // GitHub #241: non-cutscene dialogue text appearing in gameplay must scale on its very first frame (no 100% flash)
+    // 1) dialogue panel + unrelated HUD draw + dialogue text appearing on the same frame
+    frame(bottom, 0, bx, by);
+    const float dlg_same[][4] = {
+        {140, 560, 1140, 690},  // bottom dialogue panel (touches bottom edge band)
+        {1102, 2, 1278, 178},   // unrelated minimap draw in between (resets chain)
+        {240, 595, 258, 622},   // first glyph of dialogue text inside the panel (not itself in edge band)
+    };
+    float dx_[3], dy_[3];
+    frame(dlg_same, 3, dx_, dy_);
+    assert(sc[0] && sc[1] && sc[2] && dx_[2] == W / 2 && dy_[2] == H);
+
+    // 2) typewriter dialogue text growing across frames (doubling width, then wrapping to line 2) stays scaled
+    const float dlg_grow1[][4] = {{140, 650, 1140, 695}, {240, 620, 260, 644}};   // adjacent (6px above) to bottom bar
+    const float dlg_grow2[][4] = {{140, 650, 1140, 695}, {240, 620, 320, 644}};   // 4x wider (d < 0.5)
+    const float dlg_grow3[][4] = {{140, 650, 1140, 695}, {240, 620, 760, 672}};   // wraps to 2 lines (height > 2x)
+    float dgx[2], dgy[2];
+    frame(bottom, 0, bx, by);
+    frame(dlg_grow1, 1, dgx, dgy);  // bar established on previous frame
+    frame(dlg_grow1, 2, dgx, dgy);  // text appears adjacent to bar: scaled on frame 1
+    assert(sc[0] && sc[1] && dgx[1] == W / 2 && dgy[1] == H);
+    frame(dlg_grow2, 2, dgx, dgy);  // width quadruples: continues match, stays scaled
+    assert(sc[0] && sc[1] && dgx[1] == W / 2 && dgy[1] == H);
+    frame(dlg_grow3, 2, dgx, dgy);  // line wrap: continues match, stays scaled
+    assert(sc[0] && sc[1] && dgx[1] == W / 2 && dgy[1] == H);
+
+    // 3) chain joining into edge band upgrades g->scaled on frame 1
+    UiScaleGroup cg = {0};
+    float c1[4] = {240, 615, 760, 642}, c2[4] = {140, 645, 1140, 690};
+    assert(!ui_scale_group_anchor(&cg, c1, W, H, &ax, &ay));
+    assert(ui_scale_group_anchor(&cg, c2, W, H, &ax, &ay) && ax == W / 2 && ay == H);
+
+    // 4) traced non-cutscene gameplay dialogue (XCDE_UI_SCALE_TRACE frames 6710, 6725, 8858, 15226):
+    //    speaker bar + speaker name appear first (above y=648), then "A" button + Line 1 (still above y=648),
+    //    then Line 2 wraps past y=648; all pieces scale immediately around (W/2, H) from frame 1 with no 100% delay.
+    frame(bottom, 0, bx, by);
+    const float dlg_open[][4] = {
+        {207.0f, 535.0f, 633.0f, 574.0f},   // speaker name bar
+        {235.3f, 491.6f, 419.3f, 543.5f},   // speaker name text
+    };
+    const float dlg_line1[][4] = {
+        {1013.6f, 658.6f, 1068.0f, 713.0f}, // "A" button prompt
+        {264.8f, 563.6f, 319.8f, 612.4f},   // Line 1 typing (above y=648)
+        {207.0f, 535.0f, 633.0f, 574.0f},   // speaker name bar
+        {235.3f, 491.6f, 419.3f, 543.5f},   // speaker name text
+    };
+    const float dlg_wide[][4] = {
+        {62.0f, 535.0f, 488.0f, 574.0f},    // wide dialogue shifts speaker bar into left edge band
+        {90.3f, 491.6f, 502.3f, 543.5f},
+    };
+    float dlx[4], dly[4];
+    frame(dlg_open, 2, dlx, dly);
+    assert(all_(0, 2, true) && dlx[0] == W / 2 && dly[0] == H && dlx[1] == W / 2 && dly[1] == H);
+    for (int k = 0; k < UI_SCALE_SETTLE + 5; k++) {
+        frame(dlg_line1, 4, dlx, dly);
+        assert(all_(0, 4, true));
+        for (int i = 0; i < 4; i++) assert(dlx[i] == W / 2 && dly[i] == H);
+    }
+    frame(dlg_wide, 2, dlx, dly);
+    assert(all_(0, 2, true) && dlx[0] == W / 2 && dly[0] == H && dlx[1] == W / 2 && dly[1] == H);
+    // after dialogue ends, normal HUD/popups resume cleanly
+    frame(popup, 4, ox_, oy_);
+    frame(popup, 4, ox_, oy_);
+    assert(all_(0, 4, false));
+
     // the fold: X = gx * sx + ox, scaled by s around (ax, ay); the anchor stays put
     float sx = 1.5f, sy = 1.5f, ox = 0, oy = 0;
     ui_scale_fold(0.5f, 1920, 0, &sx, &sy, &ox, &oy);

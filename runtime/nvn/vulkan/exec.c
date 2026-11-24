@@ -6854,27 +6854,14 @@ static bool ui_scale_element(CmdRec *r, bool indexed, int ntex, float *ax, float
     const float *m = (const float *)(uintptr_t)st.ubuf[0][0].addr;
     float lx0 = 0, ly0 = 0, lx1 = 0, ly1 = 0;
     uint32_t count = (uint32_t)r->x[2], inst = (uint32_t)(indexed ? r->x[6] : r->x[4]);
-    if (inst <= 1 && count && count <= 64 && st.nattrib > 0 && (st.attrib[0] & 0xFF) == 0x16) {
-        uint32_t a = st.attrib[0], stream = (a >> 8) & 0x1F, off = a >> 13;
-        uint32_t stride = stream < (uint32_t)st.nstream ? st.stream[stream][0] : 0;
-        uint64_t vb = stream < 16 ? st.vbuf[stream].addr : 0, vsz = stream < 16 ? st.vbuf[stream].size : 0;
-        bool any = false;
-        for (uint32_t i = 0; vb && stride && i < count; i++) {
-            int64_t v;
-            if (indexed) {
-                uint32_t it = (uint32_t)r->x[1];
-                const void *ip = (const void *)(uintptr_t)r->x[3];
-                if (!ip) break;
-                v = it == 1 ? ((const uint16_t *)ip)[i] : it == 2 ? ((const uint32_t *)ip)[i] : ((const uint8_t *)ip)[i];
-                v += (int32_t)r->x[4];
-            } else v = (int64_t)r->x[1] + i;
-            if (v < 0 || (uint64_t)v * stride + off + 8 > vsz) continue;
-            const float *p = (const float *)(uintptr_t)(vb + (uint64_t)v * stride + off);
-            if (!isfinite(p[0]) || !isfinite(p[1])) continue;
-            if (!any) { lx0 = lx1 = p[0]; ly0 = ly1 = p[1]; any = true; }
-            else { lx0 = fminf(lx0, p[0]); lx1 = fmaxf(lx1, p[0]); ly0 = fminf(ly0, p[1]); ly1 = fmaxf(ly1, p[1]); }
-        }
-    } else if (inst > 1 && inst <= 4096 && st.nattrib > 2 && (st.attrib[2] & 0xFF) == 0x2e) {
+    // GitHub #241: a 1-glyph instanced text draw (e.g. first character of typewriter dialogue) also carries its glyph
+    // rectangle in attribute 2 (format 0x2e, per-instance stream); check it before the single-quad attribute 0 path.
+    bool glyph_text = inst >= 1 && inst <= 4096 && st.nattrib > 2 && (st.attrib[2] & 0xFF) == 0x2e;
+    if (glyph_text && inst == 1) {
+        uint32_t s2 = (st.attrib[2] >> 8) & 0x1F;
+        glyph_text = s2 < (uint32_t)st.nstream && st.stream[s2][1] > 0;
+    }
+    if (glyph_text) {
         // a text string: one instance per glyph, attribute 2 = its rectangle (width, height, x, y) in the string's
         // space (the glyph quad is x + a0.x * width, y + a0.y * height)
         uint32_t a = st.attrib[2], stream = (a >> 8) & 0x1F, off = a >> 13;
@@ -6893,6 +6880,26 @@ static bool ui_scale_element(CmdRec *r, bool indexed, int ntex, float *ax, float
             float y0 = fminf(p[3], p[3] + p[1]), y1 = fmaxf(p[3], p[3] + p[1]);
             if (!any) { lx0 = x0; lx1 = x1; ly0 = y0; ly1 = y1; any = true; }
             else { lx0 = fminf(lx0, x0); lx1 = fmaxf(lx1, x1); ly0 = fminf(ly0, y0); ly1 = fmaxf(ly1, y1); }
+        }
+    } else if (inst <= 1 && count && count <= 64 && st.nattrib > 0 && (st.attrib[0] & 0xFF) == 0x16) {
+        uint32_t a = st.attrib[0], stream = (a >> 8) & 0x1F, off = a >> 13;
+        uint32_t stride = stream < (uint32_t)st.nstream ? st.stream[stream][0] : 0;
+        uint64_t vb = stream < 16 ? st.vbuf[stream].addr : 0, vsz = stream < 16 ? st.vbuf[stream].size : 0;
+        bool any = false;
+        for (uint32_t i = 0; vb && stride && i < count; i++) {
+            int64_t v;
+            if (indexed) {
+                uint32_t it = (uint32_t)r->x[1];
+                const void *ip = (const void *)(uintptr_t)r->x[3];
+                if (!ip) break;
+                v = it == 1 ? ((const uint16_t *)ip)[i] : it == 2 ? ((const uint32_t *)ip)[i] : ((const uint8_t *)ip)[i];
+                v += (int32_t)r->x[4];
+            } else v = (int64_t)r->x[1] + i;
+            if (v < 0 || (uint64_t)v * stride + off + 8 > vsz) continue;
+            const float *p = (const float *)(uintptr_t)(vb + (uint64_t)v * stride + off);
+            if (!isfinite(p[0]) || !isfinite(p[1])) continue;
+            if (!any) { lx0 = lx1 = p[0]; ly0 = ly1 = p[1]; any = true; }
+            else { lx0 = fminf(lx0, p[0]); lx1 = fmaxf(lx1, p[0]); ly0 = fminf(ly0, p[1]); ly1 = fmaxf(ly1, p[1]); }
         }
     }
     float box[4];
