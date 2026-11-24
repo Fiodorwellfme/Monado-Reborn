@@ -20,6 +20,8 @@ bool menu_is_open(void);
 void menu_apply_window_requests(void *sdl_window);
 // Open it like F1 does (the controller: Start + Select, GitHub #22): same thread that runs the event loop.
 void menu_open_request(void);
+// Brief fading toast banner (screenshots, HUD toggle, etc.), safe to call from any thread.
+void menu_toast(const char *msg);
 // T258: renderer thread, once per native game frame (not repeated presents / generated frames).
 void menu_fps_tick(uint64_t now_ns);
 // GitHub #39: renderer thread, each presented frame: the game image's size (the performance overlay shows it).

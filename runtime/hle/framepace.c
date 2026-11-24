@@ -157,17 +157,20 @@ static inline void early_spin_pause(void) {
 }
 
 static void early_limiter_pace(void) {
-    if (!early_limiter_active()) {
+    extern bool xcde_window_focused(void);
+    bool bg_cap = !diag_deterministic() && g_settings.bg_fps > 0 && !xcde_window_focused();
+    if (!bg_cap && !early_limiter_active()) {
         xcde_early_limiter_reset(&early_lim);
         return;
     }
     int target = xcde_present_fps();
+    if (bg_cap && (target <= 0 || g_settings.bg_fps < target)) target = g_settings.bg_fps;
     uint64_t now = plat_now_ns();
     uint64_t wake = xcde_early_limiter_step(&early_lim, now, target);
     if (!wake) return;
-    const uint64_t spin_margin_ns = 1000000ull;  // sleep until 1.0 ms before deadline, then spin for sub-50 us precision
+    const uint64_t spin_margin_ns = bg_cap ? 2000000ull : 1000000ull;  // sleep until 1.0 ms before deadline, then spin for sub-50 us precision
     if (wake > now + spin_margin_ns) plat_sleep_until_ns(wake - spin_margin_ns);
-    while (plat_now_ns() < wake) early_spin_pause();
+    if (!bg_cap) while (plat_now_ns() < wake) early_spin_pause();
     g_limiter_slept_ns += plat_now_ns() - now;
 }
 

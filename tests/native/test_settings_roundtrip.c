@@ -131,5 +131,41 @@ int main(int argc, char **argv) {
     assert(g_settings.fps == 40 && g_settings.fps_limiter == FPS_LIMITER_DEFAULT);
     g_settings.fps = 0; settings_save(); g_settings.fps = 30; settings_load();
     assert(g_settings.fps == 0);
+    // [XCDE] QoL settings round-trip: focus mute, bg FPS, display/fullscreen mode, audio device, hotkeys, mod_order
+    g_settings.fullscreen_mode = FULLSCREEN_EXCLUSIVE;
+    g_settings.display_index = 2;
+    snprintf(g_settings.audio_device, sizeof g_settings.audio_device, "%s", "HDMI 5.1 AVR");
+    g_settings.mute_unfocused = true;
+    g_settings.bg_fps = 15;
+    g_settings.hotkey_menu = XCDE_KEY_INSERT;
+    g_settings.menu_pad_combo = false;
+    g_settings.hotkey_party = XCDE_KEY_F3;
+    g_settings.hotkey_screenshot = XCDE_KEY_PRINTSCREEN;
+    g_settings.hotkey_hud = XCDE_KEY_NONE;
+    settings_save();
+    g_settings.fullscreen_mode = FULLSCREEN_BORDERLESS;
+    g_settings.display_index = -1;
+    g_settings.audio_device[0] = 0;
+    g_settings.mute_unfocused = false;
+    g_settings.bg_fps = 0;
+    g_settings.hotkey_menu = XCDE_KEY_F1;
+    g_settings.menu_pad_combo = true;
+    g_settings.hotkey_party = XCDE_KEY_F2;
+    g_settings.hotkey_screenshot = XCDE_KEY_F12;
+    g_settings.hotkey_hud = XCDE_KEY_F4;
+    settings_load();
+    assert(g_settings.fullscreen_mode == FULLSCREEN_EXCLUSIVE && g_settings.display_index == 2);
+    assert(!strcmp(g_settings.audio_device, "HDMI 5.1 AVR"));
+    assert(g_settings.mute_unfocused && g_settings.bg_fps == 15);
+    assert(g_settings.hotkey_menu == XCDE_KEY_INSERT && !g_settings.menu_pad_combo);
+    assert(g_settings.hotkey_party == XCDE_KEY_F3 && g_settings.hotkey_screenshot == XCDE_KEY_PRINTSCREEN);
+    assert(g_settings.hotkey_hud == XCDE_KEY_NONE);
+    {
+        FILE *mf = fopen(argv[1], "a"); assert(mf);
+        fputs("mod_order = mod_z, mod_a\n", mf); fclose(mf);
+        settings_load();
+        assert(settings_mod_priority("mod_z") == 0 && settings_mod_priority("mod_a") == 1);
+        assert(settings_mod_priority("unlisted") > settings_mod_priority("mod_a"));
+    }
     assert(!remove(argv[1])); puts("settings round-trip: stable GPU ID, policies, 1.5x, window size, unknown keys and default reset OK"); return 0;
 }

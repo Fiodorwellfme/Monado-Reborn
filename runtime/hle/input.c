@@ -266,7 +266,7 @@ static void recompute_pad(void) {
         // Both are hidden from the game while they are held together: its own Plus menu doesn't open behind it.
         static bool menu_combo_was;
         bool st = host >> SDL_GAMEPAD_BUTTON_START & 1, sel = host >> SDL_GAMEPAD_BUTTON_BACK & 1;
-        if (st && sel) {
+        if (g_settings.menu_pad_combo && st && sel) {
             host &= ~((1u << SDL_GAMEPAD_BUTTON_START) | (1u << SDL_GAMEPAD_BUTTON_BACK));
             if (!menu_combo_was && !host_test) {
                 extern void menu_open_request(void);  // runtime/ui/menu.h (headless: the stub's no-op)
@@ -274,7 +274,7 @@ static void recompute_pad(void) {
                 LOG("[input] Start + Select: quick menu\n");
             }
         }
-        menu_combo_was = st && sel;
+        menu_combo_was = g_settings.menu_pad_combo && st && sel;
     }
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++)
@@ -434,9 +434,26 @@ void input_handle_event(const SDL_Event *e) {
             extern void vk_rec_toggle(void);
             vk_rec_toggle();
         }
-        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F2 && !e->key.repeat) {  // [XCDE] party mod
+        if (e->type == SDL_EVENT_KEY_DOWN && g_settings.hotkey_party != XCDE_KEY_NONE &&
+            (int)e->key.scancode == g_settings.hotkey_party && !e->key.repeat) {  // [XCDE] party mod
             extern void party_switch_request(int step);
             party_switch_request(1);
+        }
+        if (e->type == SDL_EVENT_KEY_DOWN && g_settings.hotkey_screenshot != XCDE_KEY_NONE &&
+            (int)e->key.scancode == g_settings.hotkey_screenshot && !e->key.repeat) {  // [XCDE] user screenshot hotkey
+            extern void vk_request_user_screenshot(void);
+            vk_request_user_screenshot();
+        }
+        if (e->type == SDL_EVENT_KEY_DOWN && g_settings.hotkey_hud != XCDE_KEY_NONE &&
+            (int)e->key.scancode == g_settings.hotkey_hud && !e->key.repeat) {  // [XCDE] HUD visibility toggle
+            extern void menu_toast(const char *msg);
+            g_settings.hide_hud = !g_settings.hide_hud;
+            char msg[96];
+            const char *k = xcde_hotkey_label(g_settings.hotkey_hud, XCDE_KEY_F4, g_settings.ui_lang != 0);
+            snprintf(msg, sizeof msg, g_settings.hide_hud
+                ? (g_settings.ui_lang ? "HUD hidden (%s to restore)" : "HUD oculto (%s para mostrar)")
+                : (g_settings.ui_lang ? "HUD visible" : "HUD visible"), k);
+            menu_toast(msg);
         }
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
         recompute_keyboard();

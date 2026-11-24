@@ -5,11 +5,13 @@
 #include "graphics_options.h"
 #include "fps_limiter.h"
 #include "audio_options.h"  // [XCDE] audio output channel mode (auto / stereo / 5.1)
+#include "hotkeys.h"        // [XCDE] customizable overlay / party / screenshot / HUD hotkeys
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
+enum { FULLSCREEN_BORDERLESS = 0, FULLSCREEN_EXCLUSIVE = 1 };  // [XCDE] fullscreen presentation style
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12,
        RES_1_5 = 13 /* 1.5x the game's frame: 1080p for XCDE */ };
 // (11 was 67% of the display: larecomp.ini "67%" now loads as RES_Q75)
@@ -51,7 +53,18 @@ typedef struct {
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
-    int audio_channels;  // [XCDE] AUDIO_OUT_*: auto (5.1 on >=6ch device, else stereo), stereo, 5.1 (restart)
+    int audio_channels;  // [XCDE] AUDIO_OUT_*: auto (5.1 on >=6ch device, else stereo), stereo, 5.1 (live hot-swap)
+    char audio_device[128]; // [XCDE] SDL3 playback device name (empty = system default; live hot-swap)
+    bool mute_unfocused; // [XCDE] mute audio while the game window is unfocused
+    int bg_fps;          // [XCDE] background FPS cap when unfocused: 0 = off, 15, 30
+    int fullscreen_mode; // [XCDE] FULLSCREEN_BORDERLESS (0) or FULLSCREEN_EXCLUSIVE (1)
+    int display_index;   // [XCDE] preferred monitor index (-1 = automatic / current display)
+    int hotkey_menu;     // [XCDE] overlay menu key (default XCDE_KEY_F1)
+    bool menu_pad_combo; // [XCDE] Start + Select opens the overlay menu (default true)
+    int hotkey_party;    // [XCDE] party switch key (default XCDE_KEY_F2)
+    int hotkey_screenshot; // [XCDE] screenshot key (default XCDE_KEY_F12)
+    int hotkey_hud;      // [XCDE] toggle field HUD visibility key (default XCDE_KEY_F4)
+    bool hide_hud;       // [XCDE] live runtime toggle (not saved): hide field/battle HUD for screenshots
     bool reverb;         // room reverb effect
     bool movie_audio;
     bool show_fps;
@@ -137,6 +150,7 @@ extern int g_window_w, g_window_h;  // [XCDE] windowed size (xcde.ini "window = 
 
 void settings_load(void);
 void settings_save(void);
+int settings_mod_priority(const char *name);  // [XCDE] lower index = applied earlier; later wins on conflict
 // The language code to serve the game ("es", "en-US", ...): the setting, or the host locale for LANG_AUTO
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")

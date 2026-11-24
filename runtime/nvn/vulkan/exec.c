@@ -7393,8 +7393,8 @@ static void draw_(CmdRec *r, bool indexed) {
     {   // static: [XCDE] test toggle - the old behaviour with XCDE_UI_STRETCH=1 (every draw fills the window, UI stretches)
         static int ui_stretch = -1;
         if (ui_stretch < 0) ui_stretch = getenv("XCDE_UI_STRETCH") != NULL;
-        // ([XCDE] #121: the classification also runs at 16:9 when the HUD is scaled; there the box is the whole window)
-        if (!ui_stretch && (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy || ui_s != 1.0f) && st.rt.ncolor &&
+        // ([XCDE] #121: the classification also runs at 16:9 when the HUD is scaled or hidden; there the box is the whole window)
+        if (!ui_stretch && (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy || ui_s != 1.0f || g_settings.hide_hud) && st.rt.ncolor &&
             renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
         // [XCDE] GitHub #24/#22 feedback: the mapping must not vary per element - every non-fullscreen draw is a UI
@@ -7535,7 +7535,8 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (n <= 127) wide_ui = (uint8_t)(n | (along_y ? 0x80 : 0));
             }
             // [XCDE] #121: the HUD only - menus are whole-screen layouts and stay as the game draws them
-            if (ui_s != 1.0f && !ui_menu) ui_s_draw = ui_scale_element(r, indexed, pr->fi->ntex, &ui_s_ax, &ui_s_ay);
+            if ((ui_s != 1.0f || g_settings.hide_hud) && !ui_menu) ui_s_draw = ui_scale_element(r, indexed, pr->fi->ntex, &ui_s_ax, &ui_s_ay);
+            if (g_settings.hide_hud && !ui_menu && ui_s_draw) return;
             else if (ui_s != 1.0f && g_debug_frame && getenv("XCDE_UI_SCALE_LOG"))
                 LOG("[ui-scale] vs %llx: menu open (not scaled)\n", (unsigned long long)st.program->stages[0].code_addr);
         }

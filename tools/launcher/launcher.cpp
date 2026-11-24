@@ -15,6 +15,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <algorithm>
+#include <map>
 #include <vector>
 
 #include "imgui.h"
@@ -34,6 +35,7 @@
 #include "../../runtime/grass_lod.h"
 #include "../../runtime/graphics_options.h"
 #include "../../runtime/audio_options.h"  // [XCDE] audio output channel policy (auto / stereo / 5.1)
+#include "../../runtime/hotkeys.h"        // [XCDE] customizable overlay / party / screenshot / HUD hotkeys
 #include "update_check.h"  // GitHub #119
 
 // [XCDE] T275: the launcher does not link runtime/log.c; the shared settings code (graphics_options.h) logs through it.
@@ -216,6 +218,8 @@ struct Cfg {
     int session_fix = -1;   // issue #25: -1 automatic (worker stays on), 0 off, 1 on = no async render worker (xcde.ini session_fix)
     bool gpu_memory_budget = true, gpu_performance = false, gpu_keep_heavy = false;
     bool fullscreen = false;
+    int fullscreen_mode = FULLSCREEN_BORDERLESS;
+    int display_index = -1;
     int aspect = ASPECT_UNLOCKED;
     int ui_scale = 100;     // GitHub #121: HUD size in % (50..100), runtime/ui_scale.h
     int win = 0;            // index into k_wins
@@ -240,8 +244,11 @@ struct Cfg {
     bool show_fps = false;
     int fps = 30;           // target FPS (15..1000, 0 = unlimited)
     int fps_limiter = FPS_LIMITER_DEFAULT;  // [XCDE] default (game) or early (RTSS / MangoHud style)
+    int bg_fps = 0;         // [XCDE] background FPS cap when unfocused: 0 = off, 15, 30
     int volume = 100;
     int audio_channels = AUDIO_OUT_AUTO;  // [XCDE] AUDIO_OUT_*: auto / stereo / 5.1
+    char audio_device[128] = "";  // [XCDE] SDL3 playback device name (empty = system default)
+    bool mute_unfocused = false;  // [XCDE] mute audio when game window loses focus
     bool movie_audio = true;
     int lang = 0;           // index into k_langs
     int pad[NPAD];
@@ -251,6 +258,11 @@ struct Cfg {
     int stick_deadzone = 0;     // % of the stick's travel read as centred (0: raw)
     bool mouse_invert = false;
     bool rumble = true;     // [XCDE] hand the game's controller vibration to SDL (xcde.ini rumble)
+    int hotkey_menu = XCDE_KEY_F1;
+    bool menu_pad_combo = true;
+    int hotkey_party = XCDE_KEY_F2;
+    int hotkey_screenshot = XCDE_KEY_F12;
+    int hotkey_hud = XCDE_KEY_F4;
     int ui_lang = 1;            // the launcher's own language: 0 Spanish, 1 English (xcde.ini launcher_lang)
     int icons = 0;              // button prompts: 0 auto (the connected controller, else the keyboard), 1 Switch, 2 Xbox, 3 PlayStation, 4 keyboard
     EnvVar env[NENV] = {};      // [XCDE] environment variables for the game (xcde_env.ini)
@@ -586,6 +598,7 @@ static void open_folder(const std::string &dir) {
 #endif
 struct Mod { std::string name; bool on = true; bool present = true; };
 static std::vector<Mod> g_mods;  // (mods tab; xcde.ini mod_<name>)
+static std::vector<std::string> g_mod_order;
 
 static int find(const char *const *list, int n, const char *v) {
     for (int i = 0; i < n; i++) if (!strcmp(list[i], v)) return i;
@@ -683,6 +696,8 @@ static void load() {
         for (char *e = v + strlen(v); e > v && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n'); ) *--e = 0;
         int i;
         if (!strcmp(k, "fullscreen")) g.fullscreen = atoi(v) != 0;
+        else if (!strcmp(k, "fullscreen_mode")) g.fullscreen_mode = !strcmp(v, "exclusive") ? FULLSCREEN_EXCLUSIVE : FULLSCREEN_BORDERLESS;
+        else if (!strcmp(k, "display_index")) g.display_index = std::clamp(atoi(v), -1, 15);
         else if (!strcmp(k, "aspect")) g.aspect = !strcmp(v, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(k, "ui_scale")) g.ui_scale = ui_scale_percent(atoi(v));
         else if (!strcmp(k, "window") && (i = find(k_wins, k_nwins, v)) >= 0) g.win = i;
@@ -738,10 +753,31 @@ static void load() {
         else if (!strcmp(k, "gpu_keep_heavy")) g.gpu_keep_heavy = atoi(v) != 0;
         else if (!strcmp(k, "fps")) g.fps = xcde_fps_parse(v);
         else if (!strcmp(k, "fps_limiter")) g.fps_limiter = xcde_fps_limiter_parse(v);
+        else if (!strcmp(k, "bg_fps")) { int b = atoi(v); g.bg_fps = (b == 15 || b == 30) ? b : 0; }
         else if (!strcmp(k, "volume")) g.volume = atoi(v);
         else if (!strcmp(k, "audio_channels")) g.audio_channels = audio_out_parse(v);
+        else if (!strcmp(k, "audio_device")) snprintf(g.audio_device, sizeof g.audio_device, "%s", v);
+        else if (!strcmp(k, "mute_unfocused")) g.mute_unfocused = atoi(v) != 0;
+        else if (!strcmp(k, "hotkey_menu")) g.hotkey_menu = xcde_hotkey_parse(v, XCDE_KEY_F1, false);
+        else if (!strcmp(k, "menu_pad_combo")) g.menu_pad_combo = atoi(v) != 0;
+        else if (!strcmp(k, "hotkey_party")) g.hotkey_party = xcde_hotkey_parse(v, XCDE_KEY_F2, true);
+        else if (!strcmp(k, "hotkey_screenshot")) g.hotkey_screenshot = xcde_hotkey_parse(v, XCDE_KEY_F12, true);
+        else if (!strcmp(k, "hotkey_hud")) g.hotkey_hud = xcde_hotkey_parse(v, XCDE_KEY_F4, true);
         else if (!strcmp(k, "movie_audio")) g.movie_audio = atoi(v) != 0;
         else if (!strcmp(k, "language") && (i = find(k_lang_ini, 10, v)) >= 0) g.lang = i;
+        else if (!strcmp(k, "mod_order")) {
+            g_mod_order.clear();
+            const char *p = v;
+            while (*p) {
+                while (*p == ' ' || *p == '\t' || *p == ',') p++;
+                if (!*p) break;
+                const char *st = p;
+                while (*p && *p != ',') p++;
+                const char *en_ = p;
+                while (en_ > st && (en_[-1] == ' ' || en_[-1] == '\t')) en_--;
+                if (en_ > st) g_mod_order.emplace_back(st, (size_t)(en_ - st));
+            }
+        }
         else if (!strncmp(k, "mod_", 4)) g_mods.push_back(Mod{k + 4, atoi(v) != 0, false});
         else if (!strncmp(k, "bind_pad_", 9) && (i = find(k_ini, NPAD, k + 9)) >= 0) {
             int h = find(k_pad_ini, PADB_COUNT, v);
@@ -779,7 +815,8 @@ static bool save() {
     fprintf(f, "session_fix = %s\n", g.session_fix == 1 ? "on" : g.session_fix == 0 ? "off" : "auto");
     gfx_save(f, &g.graphics);  // [XCDE]
     fprintf(f,"low_memory = %d\ndynamic_min_height = %d\ndynamic_max_height = %d\neffects_off = %u\n",g.gpu_performance,g.dynamic_min_height,g.dynamic_max_height,g.effects_off);
-    fprintf(f, "fullscreen = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n", g.fullscreen,
+    fprintf(f, "fullscreen = %d\nfullscreen_mode = %s\ndisplay_index = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n",
+            g.fullscreen, g.fullscreen_mode == FULLSCREEN_EXCLUSIVE ? "exclusive" : "borderless", g.display_index,
             k_wins[g.win], k_res_ini[g.res], g.upscaler_auto ? "auto" : k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
     fprintf(f, "aspect = %s\n", g.aspect == ASPECT_ORIGINAL ? "original" : "auto");
     fprintf(f, "ui_scale = %d\n", ui_scale_percent(g.ui_scale));
@@ -807,10 +844,24 @@ static bool save() {
     fprintf(f, "cheat_no_fall_damage = %d\n", g.cheats.cheat_no_fall_damage);
     fprintf(f, "cheat_high_jump = %d\n", g.cheats.cheat_high_jump);  // [XCDE] T276: jump height x8
     fprintf(f, "camera_follow_jump = %d\n", g.cheats.camera_follow_jump);  // [XCDE] T276: camera follows jumps
-    fprintf(f, "volume = %d\naudio_channels = %s\nmovie_audio = %d\nlanguage = %s\n", g.volume,
-            audio_out_ini[audio_out_valid(g.audio_channels)], g.movie_audio, k_lang_ini[g.lang]);
+    fprintf(f, "volume = %d\naudio_channels = %s\naudio_device = %s\nmute_unfocused = %d\nbg_fps = %d\nmovie_audio = %d\nlanguage = %s\n",
+            g.volume, audio_out_ini[audio_out_valid(g.audio_channels)], g.audio_device, g.mute_unfocused, g.bg_fps, g.movie_audio, k_lang_ini[g.lang]);
+    fprintf(f, "hotkey_menu = %s\nmenu_pad_combo = %d\nhotkey_party = %s\nhotkey_screenshot = %s\nhotkey_hud = %s\n",
+            xcde_hotkey_ini(g.hotkey_menu, XCDE_KEY_F1), g.menu_pad_combo,
+            xcde_hotkey_ini(g.hotkey_party, XCDE_KEY_F2),
+            xcde_hotkey_ini(g.hotkey_screenshot, XCDE_KEY_F12),
+            xcde_hotkey_ini(g.hotkey_hud, XCDE_KEY_F4));
     if (g.fps > 0) fprintf(f, "fps = %d\n", xcde_fps_clamp(g.fps)); else fprintf(f, "fps = unlimited\n");
     fprintf(f, "fps_limiter = %s\n", xcde_fps_limiter_ini[xcde_fps_limiter_valid(g.fps_limiter)]);
+    {   // [XCDE] Mod load order (lowest -> highest priority; later wins on file conflict)
+        bool first = true;
+        for (const Mod &m : g_mods) {
+            if (is_icon_mod(m.name)) continue;
+            if (first) { fprintf(f, "mod_order = %s", m.name.c_str()); first = false; }
+            else fprintf(f, ",%s", m.name.c_str());
+        }
+        if (!first) fputc('\n', f);
+    }
     for (const Mod &m : g_mods) if (!is_icon_mod(m.name)) fprintf(f, "mod_%s = %d", m.name.c_str(), m.on), fputc(10, f);
     int ic = icons_effective(g.icons);
     fprintf(f, "button_icons = %s\nmod_%s = %d\nmod_%s = %d\nmod_icons_keyboard = %d\n", k_icon_ini[g.icons], k_icon_mod[0], ic == 2,
@@ -1996,9 +2047,75 @@ static void tab_home() {
     upd_section();  // GitHub #119
 }
 static void make_report();
+static uint64_t dir_size_bytes(const std::string &dir) {
+    uint64_t total = 0;
+    struct Ctx { uint64_t *total; };
+    Ctx ctx{&total};
+    SDL_EnumerateDirectory(dir.c_str(), [](void *ud, const char *dirname, const char *fname) -> SDL_EnumerationResult {
+        if (!fname || fname[0] == '.') return SDL_ENUM_CONTINUE;
+        std::string full = std::string(dirname) + fname;
+        SDL_PathInfo pi;
+        if (SDL_GetPathInfo(full.c_str(), &pi)) {
+            if (pi.type == SDL_PATHTYPE_FILE) *static_cast<Ctx *>(ud)->total += pi.size;
+            else if (pi.type == SDL_PATHTYPE_DIRECTORY) *static_cast<Ctx *>(ud)->total += dir_size_bytes(full);
+        }
+        return SDL_ENUM_CONTINUE;
+    }, &ctx);
+    return total;
+}
+
+static void open_or_create_folder(const char *rel) {
+    std::string p = path(rel);
+    SDL_CreateDirectory(p.c_str());
+#ifdef _WIN32
+    shell_open(p);
+#else
+    open_folder(p);
+#endif
+}
+
+static void clear_shader_cache() {
+    static const char *const files[] = {
+        "cache/spirv.pack", "cache/spirv.idx", "cache/vk_pipelines.bin", "cache/variants.bin",
+        "cache/precompile_inflight.bin", "cache/precompile_progress.txt", "cache/precompile_skip.txt",
+        "cache/precompile_sig.txt"
+    };
+    for (const char *f : files) SDL_RemovePath(path(f).c_str());
+    SDL_RemovePath(path("cache/spirv").c_str());
+}
+
 static void tab_diagnostics() {
+    const bool en = g.ui_lang != 0;
     if (ImGui::Button(T("Crear reporte"))) make_report();
-    ImGui::TextWrapped("%s",g.ui_lang ? "Includes configuration and logs; excludes saves and game files." : "Incluye configuración y registros; excluye partidas y archivos del juego.");
+    ImGui::TextWrapped("%s",en ? "Includes configuration and logs; excludes saves and game files." : "Incluye configuración y registros; excluye partidas y archivos del juego.");
+
+    ImGui::SeparatorText(en ? "Cache & Maintenance" : "Caché y mantenimiento");
+    static uint64_t cache_bytes = 0;
+    static bool cache_measured = false, confirm_clear = false, cache_cleared = false;
+    static Uint64 confirm_at = 0;
+    if (!cache_measured) { cache_bytes = dir_size_bytes(path("cache")); cache_measured = true; }
+    ImGui::Text(en ? "Shader / pipeline cache size: %.1f MiB" : "Tamaño de la caché de shaders / pipelines: %.1f MiB",
+                (double)cache_bytes / (1024.0 * 1024.0));
+    if (ImGui::Button(en ? "Clear shader cache" : "Limpiar caché de shaders")) {
+        if (confirm_clear) {
+            clear_shader_cache();
+            cache_bytes = dir_size_bytes(path("cache"));
+            confirm_clear = false;
+            cache_cleared = true;
+        } else {
+            confirm_clear = true;
+            cache_cleared = false;
+            confirm_at = SDL_GetTicks();
+        }
+    }
+    if (confirm_clear && SDL_GetTicks() - confirm_at > 3000) confirm_clear = false;
+    if (confirm_clear) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.75f, 0.25f, 1), "%s", en ? "Click again to confirm." : "Pulsa otra vez para confirmar."); }
+    else if (cache_cleared) { ImGui::SameLine(); ImGui::TextDisabled("%s", en ? "Cache cleared." : "Caché limpiada."); }
+    if (ImGui::Button(en ? "Open logs folder" : "Abrir carpeta de registros")) open_or_create_folder("build");
+    ImGui::SameLine();
+    if (ImGui::Button(en ? "Open screenshots" : "Abrir capturas")) open_or_create_folder("screenshots");
+    ImGui::SameLine();
+    if (ImGui::Button(en ? "Open saves folder" : "Abrir partidas")) open_or_create_folder("save");
 
     // [XCDE] environment variables for the game: NAME=VALUE rows, saved to xcde_env.ini and applied when PLAY starts
     // the game (or the shader precompiler). Useful for the XCDE_* diagnostic switches (e.g. XCDE_RSC_PIXEL=1).
@@ -2163,6 +2280,38 @@ static void tab_graphics() {
     }
     ImGui::SeparatorText(T("Pantalla"));
     ImGui::Checkbox(T("Pantalla completa"), &g.fullscreen);
+    {
+        const char *fs_modes[] = {g.ui_lang ? "Borderless (desktop)" : "Sin bordes (escritorio)",
+                                  g.ui_lang ? "Exclusive fullscreen" : "Pantalla completa exclusiva"};
+        int fm = g.fullscreen_mode == FULLSCREEN_EXCLUSIVE ? 1 : 0;
+        ImGui::SetNextItemWidth(260 * g_scale);
+        if (monado_combo(g.ui_lang ? "Fullscreen mode" : "Modo pantalla completa", &fm, fs_modes, 2))
+            g.fullscreen_mode = fm ? FULLSCREEN_EXCLUSIVE : FULLSCREEN_BORDERLESS;
+    }
+    {   // [XCDE] Display / Monitor picker
+        int ndisp = 0;
+        SDL_DisplayID *disps = SDL_GetDisplays(&ndisp);
+        char dpreview[128];
+        if (g.display_index < 0 || !disps || g.display_index >= ndisp) {
+            snprintf(dpreview, sizeof dpreview, "%s", g.ui_lang ? "Automatic (current display)" : "Automático (pantalla actual)");
+        } else {
+            const char *dn = SDL_GetDisplayName(disps[g.display_index]);
+            snprintf(dpreview, sizeof dpreview, "%d: %s", g.display_index + 1, dn ? dn : "Display");
+        }
+        ImGui::SetNextItemWidth(300 * g_scale);
+        if (monado_begin_combo(g.ui_lang ? "Display / Monitor" : "Monitor / Pantalla", dpreview)) {
+            if (ImGui::Selectable(g.ui_lang ? "Automatic (current display)" : "Automático (pantalla actual)", g.display_index < 0))
+                g.display_index = -1;
+            for (int i = 0; disps && i < ndisp && i < 16; i++) {
+                const char *dn = SDL_GetDisplayName(disps[i]);
+                char item[144];
+                snprintf(item, sizeof item, "%d: %s", i + 1, dn ? dn : "Display");
+                if (ImGui::Selectable(item, g.display_index == i)) g.display_index = i;
+            }
+            ImGui::EndCombo();
+        }
+        SDL_free(disps);
+    }
     const char *aspects[] = {g.ui_lang ? "Automatic" : "Automático", g.ui_lang ? "Original 16:9" : "16:9 original"};
     monado_combo(g.ui_lang ? "Aspect ratio" : "Relación de aspecto", &g.aspect, aspects, 2);
     ImGui::SetNextItemWidth(260 * g_scale);
@@ -2301,6 +2450,16 @@ static void tab_graphics() {
                           "30 estables: las cinemáticas van a 30 parejos como en Switch (con V-Sync en un monitor\n"
                           "de 60 Hz cada imagen dura exactamente dos refrescos).\n"
                           "Con 'Generación de frames solo en cinemáticas' también van a 30, con generación encima."));
+    {   // [XCDE] Background FPS cap when unfocused
+        const char *bg_en[] = {"Off (uncapped)", "15 FPS", "30 FPS"};
+        const char *bg_es[] = {"Desactivado", "15 FPS", "30 FPS"};
+        int bi = g.bg_fps == 15 ? 1 : g.bg_fps == 30 ? 2 : 0;
+        ImGui::SetNextItemWidth(260 * g_scale);
+        if (monado_combo(g.ui_lang ? "Background FPS limit" : "Límite de FPS en segundo plano", &bi, g.ui_lang ? bg_en : bg_es, 3))
+            g.bg_fps = bi == 1 ? 15 : bi == 2 ? 30 : 0;
+        ImGui::SetItemTooltip("%s", g.ui_lang ? "Caps frame rate while the window is unfocused to reduce GPU/CPU load."
+                                              : "Limita los FPS cuando la ventana está en segundo plano para reducir la carga.");
+    }
     editable=quality_settings();
     if (g.quality_preset==preset_before && !xcde_quality_equal(before,xcde_quality_current(&editable))) g.quality_preset=QUALITY_CUSTOM;
     if (ImGui::Button(g.ui_lang ? "Restore graphics" : "Restaurar gráficos")) {
@@ -2371,6 +2530,28 @@ static void tab_controls() {
     ImGui::SliderInt(T("Zona muerta de los sticks (%)"), &g.stick_deadzone, 0, 30);
     ImGui::SetItemTooltip(T("Para un mando con drift (el personaje o la cámara se mueven solos): esa parte del recorrido\n"
                           "del stick cuenta como centrada. 0 = sin cambios (el juego ya tiene la suya)."));
+    if (ImGui::CollapsingHeader(g.ui_lang ? "Overlay, Party Switch, Screenshot & HUD Hotkeys" : "Atajos de menú, cambio de personaje, captura y HUD")) {
+        auto hk_combo = [](const char *label, int *sc, int fb, bool allow_none, bool en) {
+            ImGui::SetNextItemWidth(180 * g_scale);
+            if (monado_begin_combo(label, xcde_hotkey_label(*sc, fb, en))) {
+                for (int i = allow_none ? 0 : 1; i < XCDE_HOTKEY_COUNT; i++) {
+                    const char *txt = i == 0 ? (en ? "None" : "Ninguna") : xcde_hotkey_choices[i].label;
+                    bool sel = (*sc == xcde_hotkey_choices[i].scancode);
+                    if (ImGui::Selectable(txt, sel)) *sc = xcde_hotkey_choices[i].scancode;
+                    if (sel) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        };
+        const bool en = g.ui_lang != 0;
+        hk_combo(en ? "Overlay menu key" : "Tecla del menú de opciones", &g.hotkey_menu, XCDE_KEY_F1, false, en);
+        ImGui::SameLine();
+        ImGui::Checkbox(en ? "Start + Select opens overlay" : "Start + Select abre el menú", &g.menu_pad_combo);
+        hk_combo(en ? "Party switch key" : "Tecla cambio de personaje", &g.hotkey_party, XCDE_KEY_F2, true, en);
+        ImGui::SameLine();
+        hk_combo(en ? "Screenshot key" : "Tecla captura de pantalla", &g.hotkey_screenshot, XCDE_KEY_F12, true, en);
+        hk_combo(en ? "Toggle field HUD key" : "Tecla ocultar/mostrar HUD", &g.hotkey_hud, XCDE_KEY_F4, true, en);
+    }
     ImGui::TextDisabled(T("Artes 1-8 y talento: en combate seleccionan el arte de ese hueco de la paleta y lo usan."));
     if (ImGui::BeginTable("binds", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY,
                           ImVec2(0, ImGui::GetContentRegionAvail().y))) {
@@ -2478,7 +2659,15 @@ static void scan_mods() {
         FindClose(h);
     }
 #endif
-    std::sort(found.begin(), found.end(), [](const Mod &a, const Mod &b) { return a.name < b.name; });
+    auto mod_prio = [](const std::string &name) -> int {
+        for (size_t i = 0; i < g_mod_order.size(); i++) if (g_mod_order[i] == name) return (int)i;
+        return 0x7fffffff;
+    };
+    std::sort(found.begin(), found.end(), [&](const Mod &a, const Mod &b) {
+        int pa = mod_prio(a.name), pb = mod_prio(b.name);
+        if (pa != pb) return pa < pb;
+        return a.name < b.name;
+    });
     for (const Mod &o : g_mods) {  // (keep the settings of folders not present now)
         bool here = false;
         for (const Mod &m : found) here |= m.name == o.name;
@@ -2580,38 +2769,137 @@ static void make_report() {
 #endif
 }
 
+struct ModConflict { std::string file; std::vector<std::string> mods; };
+static std::vector<ModConflict> g_mod_conflicts;
+static bool g_conflicts_dirty = true;
+
+static void collect_mod_files(const std::string &base, const std::string &rel, const std::string &mod_name,
+                              std::map<std::string, std::vector<std::string>> &owners) {
+    struct Ctx {
+        const std::string *base, *rel, *mod_name;
+        std::map<std::string, std::vector<std::string>> *owners;
+    };
+    std::string dir = rel.empty() ? base : base + "/" + rel;
+    Ctx ctx{&base, &rel, &mod_name, &owners};
+    SDL_EnumerateDirectory(dir.c_str(), [](void *ud, const char *dirname, const char *fname) -> SDL_EnumerationResult {
+        if (!fname || fname[0] == '.') return SDL_ENUM_CONTINUE;
+        Ctx *c = static_cast<Ctx *>(ud);
+        std::string full = std::string(dirname) + fname;
+        std::string r = c->rel->empty() ? std::string(fname) : (*c->rel + "/" + fname);
+        SDL_PathInfo pi;
+        if (SDL_GetPathInfo(full.c_str(), &pi)) {
+            if (pi.type == SDL_PATHTYPE_FILE) (*c->owners)[r].push_back(*c->mod_name);
+            else if (pi.type == SDL_PATHTYPE_DIRECTORY) collect_mod_files(*c->base, r, *c->mod_name, *c->owners);
+        }
+        return SDL_ENUM_CONTINUE;
+    }, &ctx);
+}
+
+static void scan_mod_conflicts() {
+    g_mod_conflicts.clear();
+    std::map<std::string, std::vector<std::string>> owners;
+    for (const Mod &m : g_mods) {
+        if (!m.present || !m.on || is_icon_mod(m.name)) continue;
+        collect_mod_files(path(("mods/" + m.name + "/romfs").c_str()), "", m.name, owners);
+    }
+    for (auto &kv : owners)
+        if (kv.second.size() > 1) g_mod_conflicts.push_back(ModConflict{kv.first, std::move(kv.second)});
+    g_conflicts_dirty = false;
+}
+
+static void sync_mod_order() {
+    g_mod_order.clear();
+    for (const Mod &m : g_mods) if (!is_icon_mod(m.name)) g_mod_order.push_back(m.name);
+    g_mod_dirty = true;
+    g_conflicts_dirty = true;
+}
+
 static void tab_mods() {
+    const bool en = g.ui_lang != 0;
     static bool scanned;
-    if (!scanned) { scanned = true; scan_mods(); }
-    ImGui::TextWrapped(T("Pon cada mod en su carpeta: mods\\<nombre>\\romfs\\... (la misma estructura que en Ryujinx / yuzu). "
-                       "Sus archivos reemplazan o añaden archivos del juego. Se aplican en orden alfabético: si dos mods "
-                       "cambian el mismo archivo, gana el último. Los mods de código (exefs, parches .pchtxt / IPS) no "
-                       "funcionan en esta versión recompilada."));
-    if (ImGui::Button(T("Abrir carpeta de mods"))) {
-#ifdef _WIN32
-        SDL_CreateDirectory(path("mods").c_str());
-        shell_open(path("mods"));
-#else
-        SDL_CreateDirectory(path("mods").c_str());
-        open_folder(path("mods"));
-#endif
-    }
+    if (!scanned) { scanned = true; scan_mods(); g_conflicts_dirty = true; }
+    if (g_conflicts_dirty) scan_mod_conflicts();
+    ImGui::TextWrapped("%s", en
+        ? "Place each mod in mods/<name>/romfs/... (same layout as Ryujinx / yuzu). Mods load from top to bottom: if two mods change the same file, the lower one wins. Code mods (exefs, .pchtxt / IPS) do not apply."
+        : "Pon cada mod en mods/<nombre>/romfs/... (misma estructura que Ryujinx / yuzu). Los mods se aplican de arriba a abajo: si dos mods cambian el mismo archivo, gana el de más abajo. Los mods de código (exefs, .pchtxt / IPS) no funcionan.");
+    if (ImGui::Button(T("Abrir carpeta de mods"))) open_or_create_folder("mods");
     ImGui::SameLine();
-    if (ImGui::Button(T("Actualizar lista"))) scan_mods();
-    ImGui::Separator();
-    int shown = 0;
-    for (Mod &m : g_mods) {
-        if (!m.present || is_icon_mod(m.name)) continue;
-        if (ImGui::Checkbox(m.name.c_str(), &m.on)) g_mod_dirty=true;
-        shown++;
+    if (ImGui::Button(T("Actualizar lista"))) { scan_mods(); g_conflicts_dirty = true; }
+    if (!g_mod_conflicts.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), en ? "  %zu file conflict(s)" : "  %zu conflicto(s) de archivos",
+                           g_mod_conflicts.size());
+        if (ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::TextUnformatted(en ? "Overlapping files (bottom-most mod wins):" : "Archivos repetidos (gana el mod más abajo):");
+            for (size_t i = 0; i < g_mod_conflicts.size() && i < 12; i++) {
+                const auto &c = g_mod_conflicts[i];
+                ImGui::BulletText("%s -> %s", c.file.c_str(), c.mods.back().c_str());
+            }
+            if (g_mod_conflicts.size() > 12) ImGui::TextDisabled("... (+%zu)", g_mod_conflicts.size() - 12);
+            ImGui::EndTooltip();
+        }
     }
-    if (!shown) ImGui::TextDisabled(T("No hay mods instalados."));
+    ImGui::Separator();
+    std::vector<size_t> visible;
+    for (size_t i = 0; i < g_mods.size(); i++)
+        if (g_mods[i].present && !is_icon_mod(g_mods[i].name)) visible.push_back(i);
+    if (visible.empty()) {
+        ImGui::TextDisabled(T("No hay mods instalados."));
+        return;
+    }
+    for (size_t vi = 0; vi < visible.size(); vi++) {
+        size_t idx = visible[vi];
+        Mod &m = g_mods[idx];
+        ImGui::PushID((int)idx);
+        ImGui::BeginDisabled(vi == 0);
+        if (ImGui::SmallButton("^")) { std::swap(g_mods[idx], g_mods[visible[vi - 1]]); sync_mod_order(); ImGui::EndDisabled(); ImGui::PopID(); break; }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::BeginDisabled(vi + 1 == visible.size());
+        if (ImGui::SmallButton("v")) { std::swap(g_mods[idx], g_mods[visible[vi + 1]]); sync_mod_order(); ImGui::EndDisabled(); ImGui::PopID(); break; }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Checkbox(m.name.c_str(), &m.on)) { g_mod_dirty = true; g_conflicts_dirty = true; }
+        if (m.on) {
+            int nconf = 0;
+            for (const auto &c : g_mod_conflicts)
+                for (const auto &mn : c.mods) if (mn == m.name) { nconf++; break; }
+            if (nconf > 0) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), en ? "[%d conflict%s]" : "[%d conflicto%s]",
+                                   nconf, nconf == 1 ? "" : "s");
+            }
+        }
+        ImGui::PopID();
+    }
 }
 
 static void tab_audio() {
+    const bool en = g.ui_lang != 0;
     ImGui::SeparatorText(T("Audio"));
     ImGui::SetNextItemWidth(300 * g_scale);
     ImGui::SliderInt(T("Volumen"), &g.volume, 0, 200, "%d%%");
+    {   // [XCDE] Audio output device picker
+        static bool audio_inited;
+        if (!audio_inited) { SDL_InitSubSystem(SDL_INIT_AUDIO); audio_inited = true; }
+        int ndev = 0;
+        SDL_AudioDeviceID *devs = SDL_GetAudioPlaybackDevices(&ndev);
+        const char *cur = g.audio_device[0] ? g.audio_device : (en ? "System default" : "Predeterminado del sistema");
+        ImGui::SetNextItemWidth(340 * g_scale);
+        if (monado_begin_combo(en ? "Audio device" : "Dispositivo de audio", cur)) {
+            if (ImGui::Selectable(en ? "System default" : "Predeterminado del sistema", !g.audio_device[0]))
+                g.audio_device[0] = 0;
+            for (int i = 0; devs && i < ndev; i++) {
+                const char *dn = SDL_GetAudioDeviceName(devs[i]);
+                if (!dn || !*dn) continue;
+                if (ImGui::Selectable(dn, !strcmp(g.audio_device, dn)))
+                    snprintf(g.audio_device, sizeof g.audio_device, "%s", dn);
+            }
+            ImGui::EndCombo();
+        }
+        SDL_free(devs);
+    }
     static const char *audio_modes[] = {"Automático (5.1 si es compatible)", "Estéreo (2.0)", "Envolvente 5.1"};
     ImGui::SetNextItemWidth(300 * g_scale);
     int am = audio_out_valid(g.audio_channels);
@@ -2620,6 +2908,7 @@ static void tab_audio() {
     ImGui::SetItemTooltip("%s", g.ui_lang
         ? "Auto uses 5.1 LPCM surround on 5.1/7.1 devices and Stereo otherwise.\nThe Switch game mixes up to 5.1 (SDL maps 5.1 onto 7.1 devices)."
         : "Automático usa sonido envolvente 5.1 LPCM en dispositivos 5.1/7.1 y estéreo en el resto.\nEl juego de Switch mezcla hasta 5.1 (SDL adapta 5.1 a dispositivos 7.1).");
+    ImGui::Checkbox(en ? "Mute audio when unfocused" : "Silenciar audio en segundo plano", &g.mute_unfocused);
     ImGui::Checkbox(T("Sonido de los vídeos"), &g.movie_audio);
     ImGui::SeparatorText(T("Idioma del juego"));
     ImGui::SetNextItemWidth(260 * g_scale);

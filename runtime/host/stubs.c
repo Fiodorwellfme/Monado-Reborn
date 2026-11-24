@@ -23,6 +23,14 @@ void rando_select(const char *seed) { (void)seed; }
 bool tmp_jitter_active(void) __attribute__((weak));
 bool tmp_jitter_active(void) { return false; }
 
+// [XCDE] Weak fallbacks for headless boot / native tests (real definitions live in device.c / menu_vk.cpp).
+bool xcde_window_focused(void) __attribute__((weak));
+bool xcde_window_focused(void) { return true; }
+void vk_request_user_screenshot(void) __attribute__((weak));
+void vk_request_user_screenshot(void) {}
+void menu_toast(const char *msg) __attribute__((weak));
+void menu_toast(const char *msg) { (void)msg; }
+
 // LAS-only hooks that services/fs.c calls (save editor, flag extension, romfs read hook): nothing in XCDE.
 void romfs_file_read_hook(const char *path) { (void)path; }
 void save_editor_file_read(const char *path, uint64_t addr, int64_t off, int64_t size) { (void)path; (void)addr; (void)off; (void)size; }

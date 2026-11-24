@@ -87,7 +87,6 @@ static inline const char *monado_gfx_tooltip(int i, bool en) {
                              "tenue detrás de objetos finos (cuerdas, barandillas) al mover la cámara.";
     default: return nullptr;
     }
-    ImGui::PopID();
 }
 static inline bool monado_gfx_group(GraphicsOptions *o, const int *ids, int n, bool en, float width = 0) {
     bool changed = false;
