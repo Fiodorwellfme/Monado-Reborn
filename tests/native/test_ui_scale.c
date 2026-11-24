@@ -35,14 +35,23 @@ int main(void) {
     assert(ui_scale_anchor_y(27, 412, H) == 0);                    // the party list reaches past the middle: still the top
     assert(ui_scale_anchor_x(-1, 1281, W) == W / 2);               // a bar across the screen
 
-    // a full-frame draw (fade, tint) is never scaled
+    // a full-frame draw (fade, tint) is never scaled; sub-frame 2D quads (e.g. Arts level bar fills, #243) are not full-frame
     float full[4] = {0, 0, 1280, 720};
+    assert(ui_scale_is_full_frame(full, W, H));
     assert(!ui_scale_anchor(full, W, H, &ax, &ay));
+    float art_bar[4] = {150, 290, 290, 304}, thin_h[4] = {0, 350, 1280, 370}, thin_v[4] = {620, 0, 660, 720};
+    assert(!ui_scale_is_full_frame(art_bar, W, H));
+    assert(!ui_scale_is_full_frame(thin_h, W, H));
+    assert(!ui_scale_is_full_frame(thin_v, W, H));
 
     // the clip-space transform at the start of vertex cbuf 3 (y up) -> guest pixels (y down)
     const float m[8] = {2, 0, 0, 0.859375f, -0.0f, -3.55556f, 0, 0.75f}, vp[4] = {0, 0, 1280, 720};
     assert(ui_scale_box(m, -0.06875f, -0.06875f, 0.06875f, 0.06875f, vp, box));
     assert(fabsf(box[0] - 1101.5f) < 1 && fabsf(box[2] - 1277.5f) < 1 && box[1] < 2 && fabsf(box[3] - 177.5f) < 1);
+    assert(!ui_scale_is_full_frame(box, W, H));
+    const float m_full[8] = {2, 0, 0, 0, 0, 2, 0, 0};
+    assert(ui_scale_box(m_full, -0.5f, -0.5f, 0.5f, 0.5f, vp, box));
+    assert(ui_scale_is_full_frame(box, W, H));
     const float m3[8] = {1, 0, 0.5f, 0, 0, 1, 0, 0};  // (a z term: some other layout, not a 2D element)
     assert(!ui_scale_box(m3, 0, 0, 1, 1, vp, box));
 
