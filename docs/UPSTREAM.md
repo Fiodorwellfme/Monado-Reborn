@@ -260,9 +260,10 @@ Details and the reporter's log evidence: [CHANGELOG](dev/CHANGELOG.md).
   generating the header). `runtime/nvn/vulkan/precompile_rev.h` (`XCDE_PRECOMPILE_ARTIFACTS_REV`) covers exec.c's
   build path, which changes too often to hash.
 - `runtime/nvn/vulkan/precompile_sig.c`, `precompile_sig.h`, `precompile_rev.h` (new): the run signature (build
-  fingerprint and artifacts revision, the environment switches by presence and value - the SPIR-V options, the
-  translator's GLSL switches and the precompile's pass switches -, the game-file set by relative name/size/mtime or the
-  `.nup`'s 64-bit size/mtime, the shipped variant seed). A root must be a dump folder with a readable `romfs/` or a
+  fingerprint and artifacts revision, the effective `xcde.ini` GPU pipeline policy, the environment switches by presence
+  and value - the SPIR-V options, the translator's GLSL switches and the precompile's pass switches -, the game-file set
+  by relative name/size/mtime or the `.nup`'s 64-bit size/mtime, the shipped variant seed). A root must be a dump folder
+  with a readable `romfs/` or a
   `.nup` package file; an unreadable shader container or directory inside romfs makes the signature unreadable rather
   than describing a partial scan. Only an entry proven irrelevant is skipped (a dangling non-container link with a known
   non-directory type and `ENOENT`/`ENOTDIR`); `EACCES`, other metadata errors and `DT_UNKNOWN` stay fatal. `.glsl`
@@ -270,14 +271,19 @@ Details and the reporter's log evidence: [CHANGELOG](dev/CHANGELOG.md).
   and ignored entries are skipped with a warning.
 - `runtime/nvn/vulkan/precompile.c`: `sig` line in `cache/precompile_done.txt` (the `exe` line is gone), early exit
   for a current cache, `XCDE_PRECOMPILE_FORCE`, the `--precompile-status` answer and the build workers start after the
-  scan (the named-input masks are final then: a deterministic, converging SPIR-V cache).
+  scan (the named-input masks are final then: a deterministic, converging SPIR-V cache). Variant records are range-checked
+  before queueing; `exec.c` repeats the check in `vk_precompile_variant()` and in the game's own prewarm loader, so a
+  corrupt record cannot index past `PipeKey`'s fixed pipeline arrays.
+- `runtime/nvn/vulkan/precompile.c` loads `xcde.ini` before setting `LARECOMP_HIDDEN`, so the GPU pipeline policy is
+  applied rather than silently ignored, and passes it to the signature.
 - `runtime/host/main_boot.c`: `--precompile-status <dump>` dispatch (exit 0 current / 1 stale / 2 unreadable / 3 SPIR-V
   persistence disabled).
 - `tools/launcher/launcher.cpp`: `pc_done()` asks the runtime with the Diagnostics-tab environment (memoized,
   invalidated when the inputs can change, including a rebuilt executable, the settings and the environment rows; asked
   before the window is shown and never while a run is in flight) instead of comparing the executable; the explicit
   Precompile button passes `XCDE_PRECOMPILE_FORCE=1` (the runtime clears the crash/in-flight lists and redoes the
-  passes; a failed spawn cannot lose the stamp) and exit code 2 does not start a doomed run.
+  passes; a failed spawn cannot lose the stamp) and exit code 2 does not start a doomed run. A slow UNKNOWN probe is not
+  retried from the render path, and "Clear shader cache" removes both done stamps and drops the memoized status.
 - `tools/gamebuild/gamebuild.py`: `precompile_status` runs the same status command (timeout; 0/1/2/3 kept apart) and
   `precompile_is_current` is its `== 0`.
 - `tests/native/test_precompile_sig.c` (new), `scripts/native_tests_linux.sh`, `tests/unit/test_precompile_incremental.py`

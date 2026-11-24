@@ -336,16 +336,30 @@ class SourceContracts(unittest.TestCase):
                          launcher.index('struct PcForce {')]
         self.assertIn('PC_STATUS_UNREADABLE, PC_STATUS_DISABLED, PC_STATUS_UNKNOWN', state)
         self.assertIn('PC_UNKNOWN_RETRY_MS = 5000', state)
+        self.assertIn('PC_UNKNOWN_SLOW_MS = 1000', state)
         self.assertIn('g_pc_current = status;', state)
         self.assertNotIn('status == PC_STATUS_CURRENT ? 1', state)  # (UNKNOWN must never become CURRENT)
         self.assertIn('force && g_pc_current != PC_STATUS_CURRENT', state)
-        self.assertIn('now < g_pc_retry_at', state)
-        self.assertIn('g_pc_retry_at = status == PC_STATUS_UNKNOWN', state)
+        # [review] the deadline is measured after the probe, and a slow probe is never retried by the footer.
+        self.assertIn('Uint64 started = SDL_GetTicks();', state)
+        self.assertIn('Uint64 finished = SDL_GetTicks();', state)
+        self.assertIn('finished - started >= PC_UNKNOWN_SLOW_MS', state)
+        self.assertIn('g_pc_no_auto_retry || started < g_pc_retry_at', state)
+        self.assertIn('g_pc_retry_at = status == PC_STATUS_UNKNOWN && !g_pc_no_auto_retry ? finished + PC_UNKNOWN_RETRY_MS : 0;', state)
         self.assertIn('return pc_status(force) == PC_STATUS_CURRENT;', state)
         probe = launcher[launcher.index('static int pc_status_now() {'):launcher.index('static bool pc_running();')]
         self.assertIn('code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN', probe)
         self.assertEqual(probe.count('code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN'), 2)  # (Windows and POSIX)
         self.assertIn('if (!exists(GAME_EXE)) return PC_STATUS_UNKNOWN;', probe)
+
+    def test_clearing_the_cache_drops_the_stamps_and_the_memoized_status(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        clear = launcher[launcher.index('static void clear_shader_cache() {'):
+                         launcher.index('static void tab_diagnostics()', launcher.index('static void clear_shader_cache() {'))]
+        self.assertIn('cache/precompile_done.txt', clear)
+        self.assertIn('cache/precompile_loose_done.txt', clear)
+        self.assertNotIn('cache/precompile_sig.txt', clear)  # (that was never written)
+        self.assertIn('pc_forget();', clear)  # (otherwise the next frame keeps reporting CURRENT)
 
     def test_home_and_footer_report_unverified_shaders_honestly(self):
         launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')

@@ -22,4 +22,8 @@ bool vk_precompile_entry_skippable(const char *name, unsigned char d_type, int e
 // Writes 16 lowercase hex digits + NUL. false: the game files are not readable (nothing can be said about the cache).
 // The launcher and gamebuild's setup step must run this with the same environment the game/precompile will get
 // (xcde_env.ini included); the signature covers those options.
+// The effective xcde.ini GPU policy changes which pipeline artifacts the precompile warms, so the runtime passes the
+// values it loaded (settings.h's GPU_GPL_* / GPU_PROFILE_*). vk_precompile_sig is the auto/auto convenience wrapper.
+enum { XCDE_SIG_GPU_GPL_AUTO = -1, XCDE_SIG_GPU_PROFILE_AUTO = 0 };
+bool vk_precompile_sig_policy(const char *root, int gpu_gpl, int gpu_profile, char out[17]);
 bool vk_precompile_sig(const char *root, char out[17]);

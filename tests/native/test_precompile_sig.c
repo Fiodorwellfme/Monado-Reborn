@@ -256,6 +256,22 @@ int main(void) {
     CHECK(strcmp(a, b) != 0);
     clear_env();
 
+    // xcde.ini's GPU pipeline policy: compatibility / gpu_gpl=off makes the precompile warm whole pipelines instead of
+    // libraries. The auto policy must equal the convenience wrapper; every other value must change the signature.
+    char dump[1200];
+    path_of(dump, sizeof dump, "dump");
+    CHECK(sig_of("dump", a));
+    CHECK(vk_precompile_sig_policy(dump, XCDE_SIG_GPU_GPL_AUTO, XCDE_SIG_GPU_PROFILE_AUTO, b));
+    CHECK(!strcmp(a, b));
+    CHECK(vk_precompile_sig_policy(dump, 0, 0, b));
+    CHECK(strcmp(a, b) != 0);
+    CHECK(vk_precompile_sig_policy(dump, 0, 1, b));
+    CHECK(strcmp(a, b) != 0);
+    CHECK(vk_precompile_sig_policy(dump, 1, 0, b));
+    CHECK(strcmp(a, b) != 0);
+    CHECK(vk_precompile_sig_policy(dump, XCDE_SIG_GPU_GPL_AUTO, XCDE_SIG_GPU_PROFILE_AUTO, b));
+    CHECK(!strcmp(a, b));
+
     // Every artifact-affecting switch added by the coverage audit independently changes the signature. One
     // representative value per switch is enough: the unset/empty/value contract is exercised above.
     CHECK(sig_of("dump", a));

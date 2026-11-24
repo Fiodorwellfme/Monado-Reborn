@@ -3848,9 +3848,39 @@ typedef struct {
     ShaderKey vkey, fkey;
     PipeKey k;  // (k.prog is NULL in the file)
 } Variant;
+// [review] A variant file is cache input, not a trusted program. Validate the fields that index fixed arrays before
+// the record can reach pipeline_whole(): ncolor is written into cba[8] and read from write_mask[8], and the shader
+// keys index translator state. The game's prewarm reads the same records, so this protects both paths.
+static bool variant_valid(const Variant *v) {
+    const PipeKey *k = &v->k;
+    if (v->has_gs > 1 || v->gs_in > 3) return false;
+    if (k->ncolor > 8 || k->a2c > 1 || k->poly_fill > 1 || k->topo_class > 2 || k->logic_op > 16) return false;
+    switch (k->samples) {
+    case 1: case 2: case 4: case 8: case 16: case 32: case 64: break;
+    default: return false;
+    }
+    if (k->used_streams & ~((1u << 17) - 1)) return false;
+    for (uint32_t i = 0; i < 32; i++)
+        if ((k->attr_mask & (1u << i)) && k->attr_bind[i] >= 17) return false;
+    for (int i = 0; i < 32; i++) if (v->vkey.attr_kind[i] > 2) return false;
+    for (int i = 0; i < 8; i++) if (v->fkey.rt_kind[i] > 2) return false;
+    if (v->vkey.xfb_n > 16 || v->fkey.xfb_n > 16) return false;
+    for (int i = 0; i < 16; i++)
+        if (v->vkey.xfb_comps[i] > 4 || v->fkey.xfb_comps[i] > 4) return false;
+    if (v->vkey.alpha_func > 8 || v->fkey.alpha_func > 8) return false;
+    if (v->vkey.gs_in > 3 || v->fkey.gs_in > 3) return false;
+    if (v->vkey.glsl > 1 || v->fkey.glsl > 1) return false;
+    return true;
+}
 // The on-disk record ABI shared with the offline precompiler. It validates variant files before making any jobs, so a
 // record written by an incompatible build is skipped instead of becoming a pipeline failure on every run.
 size_t vk_precompile_variant_size(void) { return sizeof(Variant); }
+bool vk_precompile_variant_valid(const void *rec, size_t rec_size) {
+    if (!rec || rec_size != sizeof(Variant)) return false;
+    Variant v;
+    memcpy(&v, rec, sizeof v);
+    return variant_valid(&v);
+}
 static Variant *var_db;
 static size_t var_n, var_cap;
 static uint64_t var_set[1 << 18];  // hashes of the recorded variants (open addressing; [XCDE] T240: room for the whole game's tours)
@@ -3909,7 +3939,7 @@ static void var_load(void) {
             ok = true;
             Variant v;
             while (fread(&v, sizeof v, 1, f) == 1)
-                if (!var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
+                if (variant_valid(&v) && !var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
         }
         fclose(f);
         LOG("[prewarm] %zu shader variants known (cache/variants.bin)\n", var_n);
@@ -3922,7 +3952,7 @@ static void var_load(void) {
         if (sf && fread(hdr, 4, 2, sf) == 2 && hdr[0] == 0x56435843u && hdr[1] == (uint32_t)sizeof(Variant)) {
             Variant v;
             while (fread(&v, sizeof v, 1, sf) == 1)
-                if (!var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
+                if (variant_valid(&v) && !var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
             if (!ok && var_n > n0) ok = true;  // (then written into the player's own file below)
         }
         if (sf) fclose(sf);
@@ -4252,7 +4282,7 @@ int vk_precompile_program(const NvnProgram *np, const ShaderKey *vkey, const Sha
 // cache (g_vk.pcache null): the driver's own disk cache keeps the result, so the game's optimized build of that
 // pipeline - the one that replaces its fast link a few frames after the first draw - is a cache hit. Returns 1 if built.
 int vk_precompile_variant(const NvnProgram *np, const void *rec, size_t rec_size) {
-    if (rec_size != sizeof(Variant)) return 0;
+    if (!vk_precompile_variant_valid(rec, rec_size)) return 0;  // (a corrupt cache record must not reach pipeline_whole)
     Variant v;
     memcpy(&v, rec, sizeof v);
     if (v.has_gs) return 0;

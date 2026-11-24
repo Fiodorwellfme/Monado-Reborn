@@ -1104,13 +1104,15 @@ static std::string g_pc_text;
 // switches, the precompile's pass switches and the game files with the stamp's `sig` line, without scanning or starting
 // Vulkan: a rebuild that cannot change the shaders (launcher, UI, gameplay code) keeps the precompiled cache, which used
 // to be redone after every build. CURRENT and STALE are memoized; UNKNOWN is kept distinct and retried after a short
-// backoff (or immediately by PLAY), never reported as prepared. pc_forget drops the memo when the executable, game
-// files, settings or environment rows may have changed.
+// backoff when the probe itself was quick, or only by PLAY when it was slow, never reported as prepared. pc_forget drops
+// the memo when the executable, game files, settings or environment rows may have changed.
 enum { PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNREADABLE, PC_STATUS_DISABLED, PC_STATUS_UNKNOWN };
 static constexpr Uint64 PC_UNKNOWN_RETRY_MS = 5000;
+static constexpr Uint64 PC_UNKNOWN_SLOW_MS = 1000;  // (a probe this slow must never be retried automatically)
 static int g_pc_current = -1;  // -1: not asked yet; otherwise one of PC_STATUS_*
 static Uint64 g_pc_retry_at;
-static void pc_forget() { g_pc_current = -1; g_pc_retry_at = 0; }
+static bool g_pc_no_auto_retry;  // UNKNOWN after a slow/hung probe: only PLAY or another explicit action retries
+static void pc_forget() { g_pc_current = -1; g_pc_retry_at = 0; g_pc_no_auto_retry = false; }
 
 // [XCDE] T282 review: the memoized answer must not outlive a rebuilt executable (the base code stat'ed it on every call).
 // A changed exe only drops the memo: the next answer still comes from the runtime, so an unrelated rebuild (same
@@ -1185,11 +1187,17 @@ static int pc_status(bool force = false) {
     pc_check_exe();
     if (g_pc_current < 0 || (force && g_pc_current != PC_STATUS_CURRENT)) {
         if (pc_running()) return PC_STATUS_STALE;  // (a running precompile is not prepared yet)
-        Uint64 now = SDL_GetTicks();
-        if (!force && g_pc_current == PC_STATUS_UNKNOWN && now < g_pc_retry_at) return PC_STATUS_UNKNOWN;
+        Uint64 started = SDL_GetTicks();
+        if (!force && g_pc_current == PC_STATUS_UNKNOWN &&
+            (g_pc_no_auto_retry || started < g_pc_retry_at)) return PC_STATUS_UNKNOWN;
         int status = pc_status_now();
+        Uint64 finished = SDL_GetTicks();
         g_pc_current = status;
-        g_pc_retry_at = status == PC_STATUS_UNKNOWN ? now + PC_UNKNOWN_RETRY_MS : 0;
+        // [review] A 30 s status timeout used to leave the retry deadline in the past, so the footer started another
+        // blocking probe on the very next frame. Time the backoff from the end of the probe, and never repeat a slow one
+        // automatically: UNKNOWN stays visible and PLAY retries explicitly.
+        g_pc_no_auto_retry = status == PC_STATUS_UNKNOWN && finished - started >= PC_UNKNOWN_SLOW_MS;
+        g_pc_retry_at = status == PC_STATUS_UNKNOWN && !g_pc_no_auto_retry ? finished + PC_UNKNOWN_RETRY_MS : 0;
     }
     return g_pc_current;
 }
@@ -1205,6 +1213,7 @@ static bool pc_persistence_disabled() {
 static void pc_env_changed() {
     g_pc_current = pc_persistence_disabled() ? PC_STATUS_DISABLED : PC_STATUS_STALE;
     g_pc_retry_at = 0;
+    g_pc_no_auto_retry = false;
 }
 static bool pc_running() {
 #ifdef _WIN32
@@ -2153,7 +2162,7 @@ static void tab_home() {
     ImGui::TextWrapped("%s",g.ui_lang ? "For modest hardware, start with Potato and a 30 FPS target. Quality and frame rate are independent." :
         "En equipos modestos, empieza con Patata y un objetivo de 30 FPS. La calidad y los FPS se eligen por separado.");
     ImGui::SeparatorText(g.ui_lang ? "Shader preparation" : "Preparación de shaders");
-    int pc = pc_status();  // (memoized; UNKNOWN retries after a short backoff, not once per frame)
+    int pc = pc_status();  // (memoized; UNKNOWN retries after a short backoff only when the probe was quick)
     if (pc == PC_STATUS_CURRENT)
         ImGui::TextWrapped("%s", g.ui_lang ? "Prepared for this build and these game files. New areas can still need additional variants." :
             "Preparados para este build y estos archivos del juego. Algunas zonas aún pueden necesitar variantes adicionales.");
@@ -2200,10 +2209,11 @@ static void clear_shader_cache() {
     static const char *const files[] = {
         "cache/spirv.pack", "cache/spirv.idx", "cache/vk_pipelines.bin", "cache/variants.bin",
         "cache/precompile_inflight.bin", "cache/precompile_progress.txt", "cache/precompile_skip.txt",
-        "cache/precompile_sig.txt"
+        "cache/precompile_done.txt", "cache/precompile_loose_done.txt"
     };
     for (const char *f : files) SDL_RemovePath(path(f).c_str());
     SDL_RemovePath(path("cache/spirv").c_str());
+    pc_forget();  // (the cache the memoized CURRENT/STALE answer described is gone)
 }
 
 static void tab_diagnostics() {
@@ -3313,7 +3323,7 @@ int main(int argc, char **argv) {
         }
         ImGui::PopItemWidth(); ImGui::EndChild();
         ImGui::Separator();
-        int frame_pc_status = pc_status();  // (UNKNOWN retries on the central backoff even while another tab/status is shown)
+        int frame_pc_status = pc_status();  // (the central backoff keeps a slow UNKNOWN probe from freezing every frame)
         if (!have_game) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", T("Faltan los archivos del juego en targets/ (exefs y romfs de tu copia)."));
         else if (!have_exe) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", T("Falta build/xcde.exe (compila el juego primero)."));
         else if (*g_mismatch_desc) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), g.ui_lang ?

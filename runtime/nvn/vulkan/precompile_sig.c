@@ -11,6 +11,8 @@
 //    compiler sources (tools/build/shader_sig.py; <build>/inc/shader_sig.h, or -DXCDE_SHADER_SIG for a native test).
 //  - XCDE_PRECOMPILE_ARTIFACTS_REV (precompile_rev.h): revision of exec.c's build path, which shader_sig.py cannot hash
 //    without invalidating on gameplay changes; bump it when the pipeline state/libraries that pass builds change.
+//  - the effective xcde.ini GPU pipeline policy (gpu_profile compatibility / gpu_gpl on/off): it decides whether the
+//    run warms graphics-pipeline libraries or whole pipelines.
 //  - the environment options, by PRESENCE and value (a set-but-empty variable is not the same as an unset one, because
 //    stage_opt()/getenv() see "" as set): the SPIR-V optimisation/cache modes (LARECOMP_VK_OPT, XCDE_FS_OPT,
 //    XCDE_SPIRV_LOOSE, LARECOMP_VK_NO_SPIRV_CACHE), the translator switches that change the emitted GLSL
@@ -207,7 +209,7 @@ static const char *const k_sig_env[] = {
 // stays out: the pass policy for the current machine is not knowable without a Vulkan device, which --precompile-status
 // deliberately never opens.
 
-bool vk_precompile_sig(const char *root, char out[17]) {
+bool vk_precompile_sig_policy(const char *root, int gpu_gpl, int gpu_profile, char out[17]) {
     RootInfo ri;
     if (!root_info(root, &ri)) return false;
     uint64_t h = mix(0xcbf29ce484222325ull, XCDE_SHADER_SIG, strlen(XCDE_SHADER_SIG));
@@ -222,6 +224,10 @@ bool vk_precompile_sig(const char *root, char out[17]) {
         h = mix(h, v, strlen(v));
         h = mix(h, "|", 1);
     }
+    // xcde.ini's pipeline policy (settings_load): compatibility / gpu_gpl=off makes the run warm whole pipelines instead
+    // of graphics-pipeline libraries, so a cache warmed under the other policy is not the cache the game will use.
+    int32_t policy[2] = {(int32_t)gpu_gpl, (int32_t)gpu_profile};
+    h = mix(h, policy, sizeof policy);
     if (env_present("XCDE_GLSL_DIR")) {
         char glsl_dir[1100];
         const char *dir = xcde_utf8_getenv("XCDE_GLSL_DIR", glsl_dir, sizeof glsl_dir) ? glsl_dir : "";
@@ -246,4 +252,8 @@ bool vk_precompile_sig(const char *root, char out[17]) {
     h = mix(h, &files, sizeof files);
     snprintf(out, 17, "%016llx", (unsigned long long)h);
     return true;
+}
+
+bool vk_precompile_sig(const char *root, char out[17]) {
+    return vk_precompile_sig_policy(root, XCDE_SIG_GPU_GPL_AUTO, XCDE_SIG_GPU_PROFILE_AUTO, out);
 }

@@ -649,6 +649,7 @@ static _Atomic size_t n_seed_done;  // [PRECOMPILE-STALL-FIX] seed jobs finished
 // [XCDE] T240: and every recorded variant's whole optimized pipeline (exec.c vk_precompile_variant): the shipped list
 // (the debugger tours of every map and cutscene, tools/tours/tour_batch.py) plus the player's own cache/variants.bin
 extern size_t vk_precompile_variant_size(void);
+extern bool vk_precompile_variant_valid(const void *rec, size_t rec_size);
 extern int vk_precompile_variant(const NvnProgram *np, const void *rec, size_t rec_size);
 typedef struct { uint32_t vs, fs; uint8_t *rec; } VarJob;
 static VarJob *var_jobs;
@@ -694,7 +695,15 @@ static void load_seed_file(const char *path, Map *done_) {
         fclose(f);
         return;
     }
+    size_t bad = 0;
     while (fread(rec, rec_size, 1, f) == 1) {
+        // [review] A record that passes the size check can still carry ncolor > 8 or other out-of-range fields and
+        // corrupt pipeline_whole()'s fixed arrays. Validate before it becomes a job; vk_precompile_variant repeats the
+        // check as the last line of defence.
+        if (!vk_precompile_variant_valid(rec, rec_size)) {
+            if (bad++ < 20) printf("[precompile] warning: skipping invalid variant record in %s%c", path, 10);
+            continue;
+        }
         uint64_t h[3];
         memcpy(h, rec, 24);
         if (rec[24]) continue;  // (has_gs)
@@ -725,6 +734,7 @@ static void load_seed_file(const char *path, Map *done_) {
         seed_jobs = realloc(seed_jobs, (nseed + 1) * sizeof *seed_jobs);
         seed_jobs[nseed++] = j;
     }
+    if (bad) printf("[precompile] warning: skipped %zu invalid variant record(s) in %s%c", bad, path, 10);
     free(rec);
     fclose(f);
 }
@@ -1010,8 +1020,9 @@ int vk_precompile_status(const char *root) {
         printf("[precompile] SPIR-V persistence is disabled (LARECOMP_VK_NO_SPIRV_CACHE): precompilation is not applicable%c", 10);
         return 3;
     }
+    settings_load();  // [review] the same xcde.ini GPU pipeline policy the precompile applies is a signature input
     char sig[17], old[64];
-    if (!vk_precompile_sig(root, sig)) {
+    if (!vk_precompile_sig_policy(root, g_settings.gpu_gpl, g_settings.gpu_profile, sig)) {
         printf("[precompile] cannot read the game files under %s: cannot tell whether the precompiled shaders are current%c", root, 10);
         return 2;
     }
@@ -1052,8 +1063,11 @@ static int start_threads(pthread_t *threads, int count, void *(*fn)(void *), con
 
 int vk_precompile_main(const char *root) {
     uint64_t t0 = now_ns();
+    // [review] Load xcde.ini before LARECOMP_HIDDEN makes settings_load() ignore it: the GPU pipeline policy decides
+    // whether this run warms libraries or whole pipelines, and it must be both applied and part of the signature.
+    settings_load();
     char sig[17];
-    if (!vk_precompile_sig(root, sig)) {
+    if (!vk_precompile_sig_policy(root, g_settings.gpu_gpl, g_settings.gpu_profile, sig)) {
         printf("[precompile] cannot read the game files under %s%c", root, 10);
         return 2;
     }

@@ -505,6 +505,17 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
   soon as the variable is removed.
 - A precompile run that finds no shader files but recorded scan failures (a missing/corrupt package `romfs`, for example)
   now exits 2 as unreadable instead of 1 as stale, so the launcher and builder do not retry a doomed run.
-- Validation: 252 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
+- Variant records are validated before they can become jobs and again as the last line of defence: `ncolor` is limited to
+  the eight fixed colour slots, and sample counts, attribute bindings/streams, topology, logic-op and the shader-key
+  fields are range-checked. A correctly sized but corrupt `cache/variants.bin` or seed can no longer reach
+  `pipeline_whole()`'s `cba[8]`/`write_mask[8]`; the game's own prewarm uses the same validator.
+- The effective `xcde.ini` GPU pipeline policy (`gpu_profile` compatibility, `gpu_gpl` on/off) is loaded before
+  `LARECOMP_HIDDEN` makes `settings_load()` ignore the file, and is part of the cache signature. The precompile now warms
+  the same libraries/whole pipelines the game will ask for, and changing the policy invalidates the cache.
+- A status probe that takes a second or more is no longer retried automatically from the launcher's render path; the
+  retry deadline is measured after the probe, and only PLAY or another explicit action retries a slow UNKNOWN.
+- "Clear shader cache" removes `cache/precompile_done.txt` and `cache/precompile_loose_done.txt` (the old code removed the
+  never-written `cache/precompile_sig.txt`) and drops the memoized status, so the next frame cannot keep reporting CURRENT.
+- Validation: 255 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
   targeted Clang syntax checks for `precompile.c`/`exec.c`, and the Linux launcher syntax check pass. Windows execution is
   still pending; the sparse-file test is included in the Windows validation suite.

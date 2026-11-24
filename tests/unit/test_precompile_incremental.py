@@ -102,9 +102,23 @@ class RuntimeContracts(unittest.TestCase):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
         start = precompile.index('int vk_precompile_status(const char *root) {')
         block = precompile[start:precompile.index('static int start_threads(', start)]
-        self.assertIn('vk_precompile_sig(root, sig)', block)
+        # [review] the GPU policy is a signature input; settings_load only reads xcde.ini, it does not scan the game files
+        self.assertIn('settings_load();', block)
+        self.assertIn('vk_precompile_sig_policy(root, g_settings.gpu_gpl, g_settings.gpu_profile, sig)', block)
         for expensive in ('ui_window_init', 'gf_init', 'list_dir', 'scan_file', 'pthread_create'):
             self.assertNotIn(expensive, block)
+
+    def test_the_gpu_pipeline_policy_is_loaded_applied_and_signed(self):
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        start = precompile.index('int vk_precompile_main(const char *root) {')
+        main = precompile[start:precompile.index('ui_window_init();', start)]
+        # LARECOMP_HIDDEN makes settings_load ignore xcde.ini; load it first so the policy also reaches device init.
+        self.assertLess(main.index('settings_load();'), main.index('setenv("LARECOMP_HIDDEN"'))
+        self.assertIn('vk_precompile_sig_policy(root, g_settings.gpu_gpl, g_settings.gpu_profile, sig)', main)
+        signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
+        self.assertIn('int32_t policy[2]', signature)
+        self.assertIn('h = mix(h, policy, sizeof policy);', signature)
+        self.assertIn('vk_precompile_sig_policy(const char *root', signature)
 
     def test_a_current_cache_stops_before_any_work(self):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
@@ -279,6 +293,27 @@ class RuntimeContracts(unittest.TestCase):
         variant = exec_code[exec_code.index('typedef struct {\n    uint64_t code_hash[3];'):
                             exec_code.index('static Variant *var_db;')]
         self.assertIn('size_t vk_precompile_variant_size(void) { return sizeof(Variant); }', variant)
+
+    def test_variant_record_contents_are_validated_before_pipeline_build(self):
+        exec_code = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text(encoding='utf-8')
+        validator = exec_code[exec_code.index('static bool variant_valid(const Variant *v) {'):
+                              exec_code.index('// The on-disk record ABI shared with the offline precompiler')]
+        self.assertIn('k->ncolor > 8', validator)
+        self.assertIn('case 1: case 2: case 4: case 8: case 16: case 32: case 64:', validator)
+        self.assertIn('k->used_streams & ~((1u << 17) - 1)', validator)
+        self.assertIn('k->attr_bind[i] >= 17', validator)
+        self.assertIn('k->topo_class > 2', validator)
+        self.assertIn('k->logic_op > 16', validator)
+        self.assertIn('v->vkey.attr_kind[i] > 2', validator)
+        self.assertIn('v->fkey.rt_kind[i] > 2', validator)
+        # Both the game's prewarm and the offline variant worker reject a bad record; the loader also skips queueing it.
+        self.assertEqual(exec_code.count('variant_valid(&v) &&'), 2)
+        self.assertIn('if (!vk_precompile_variant_valid(rec, rec_size)) return 0;', exec_code)
+        precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
+        load = precompile[precompile.index('static void load_seed_file('):precompile.index('static void *var_worker(')]
+        self.assertIn('if (!vk_precompile_variant_valid(rec, rec_size))', load)
+        self.assertLess(load.index('if (!vk_precompile_variant_valid(rec, rec_size))'), load.index('map_put(&var_done, h, 1)'))
+        self.assertIn('skipping invalid variant record', load)
 
     def test_thread_phases_check_creation_and_join_only_started_threads(self):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
