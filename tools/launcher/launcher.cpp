@@ -1184,6 +1184,12 @@ struct PcForce {
 static bool pc_start(bool then_play, bool fresh = false) {
     apply_env();  // [XCDE] the Diagnostics tab variables also reach the shader precompiler
     if (pc_running()) return false;
+    if (fresh) pc_forget();  // (an explicit redo must re-ask under the current diagnostics environment)
+    if (pc_status() == PC_STATUS_DISABLED) {  // (the button is disabled too; this also guards the --shot path)
+        g_status = pc_idle_text(PC_STATUS_DISABLED);
+        if (then_play) g_pc_play_now = true;
+        return false;
+    }
     pc_forget();
     g_pc_t0 = SDL_GetTicks();
 #ifdef _WIN32
@@ -3049,7 +3055,8 @@ int main(int argc, char **argv) {
         ImGui::PopStyleColor(3);
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc);
+        ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc ||
+                             frame_pc_status == PC_STATUS_DISABLED);
         if (ImGui::Button(T("Precompilar shaders"))) {  // [XCDE] T281: also retries the jobs on the crash skip list
             bool retry = exists("cache/precompile_skip.txt");
             if (pc_start(false, true) && retry) g_status = T("Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)");

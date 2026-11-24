@@ -413,13 +413,7 @@ static void scan_file(const char *path) {
 
 // files that hold shaders (measured over the whole RomFS); the monolib containers (title, menus, lighting, post
 // effects) come first: the game needs them first
-static bool wanted(const char *name) {
-    const char *e = strrchr(name, '.');
-    if (!e) return false;
-    static const char *ext[] = {".wishp", ".wimdo", ".wismt", ".wismda", ".wiefb", NULL};
-    for (int i = 0; ext[i]; i++) if (!strcmp(e, ext[i])) return true;
-    return false;
-}
+static bool wanted(const char *name) { return vk_precompile_is_shader_container(name); }
 typedef struct { char *p; uint64_t sz; } Path;  // [XCDE] T281: size for the scan order (biggest first, path_cmp)
 static Path *paths;
 static size_t npaths, cappaths;
@@ -437,7 +431,7 @@ static void list_package(int node, const char *dir) {
     int count = gf_pkg_children(node, &children);
     for (int i = 0; i < count; i++) {
         int child = (int)children[i];
-        char p[1024];
+        char p[XCDE_PRECOMPILE_PATH_MAX];
         int len = snprintf(p, sizeof p, "%s/%s", dir, gf_pkg_name(child));
         if (len < 0 || (size_t)len >= sizeof p) {
             scan_failure(dir, "package path is too long");
@@ -463,7 +457,7 @@ static void list_dir(const char *dir) {
     XcdeDirent *e;
     while ((e = xcde_readdir(dd))) {
         if (e->d_name[0] == '.') continue;
-        char p[1024];
+        char p[XCDE_PRECOMPILE_PATH_MAX];
         int len = snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
         if (len < 0 || (size_t)len >= sizeof p) {
             scan_failure(dir, "path is too long");
@@ -471,7 +465,8 @@ static void list_dir(const char *dir) {
         }
         XcdeFileInfo fi;
         if (!xcde_utf8_file_info(p, &fi)) {
-            scan_failure(p, "metadata could not be read");
+            if (e->d_type == DT_DIR || wanted(e->d_name)) scan_failure(p, "metadata could not be read");
+            else printf("[precompile] skipping unreadable entry %s: not a shader container%c", p, 10);
             continue;
         }
         if (fi.isdir) list_dir(p);
@@ -1003,6 +998,8 @@ static bool write_done_stamp(const char *sig, double secs) {
 // 1 = they need preparing, 2 = the game files cannot be read, 3 = SPIR-V persistence is disabled (not applicable).
 // No cache, Vulkan device or window is touched.
 int vk_precompile_status(const char *root) {
+    // (a runtime mode, not a property of the dump: report it before touching the game files; --precompile-status is a
+    // debug/verification path, so an unreadable root in this mode is still "not applicable", not "unreadable")
     if (spirv_persistence_disabled()) {
         printf("[precompile] SPIR-V persistence is disabled (LARECOMP_VK_NO_SPIRV_CACHE): precompilation is not applicable%c", 10);
         return 3;
@@ -1060,8 +1057,12 @@ int vk_precompile_main(const char *root) {
         printf("[precompile] the precompiled shaders are current (signature %s): nothing to do (XCDE_PRECOMPILE_FORCE=1 to run anyway)%c", sig, 10);
         return 0;
     }
-    char romfs[1024];
-    snprintf(romfs, sizeof romfs, "%s/romfs", root);
+    char romfs[XCDE_PRECOMPILE_PATH_MAX];
+    int romfs_len = snprintf(romfs, sizeof romfs, "%s/romfs", root);
+    if (romfs_len < 0 || (size_t)romfs_len >= sizeof romfs) {
+        printf("[precompile] cannot read the game files under %s: the path is too long%c", root, 10);
+        return 2;
+    }
     mkdir("cache", 0755);
     mkdir("cache/spirv", 0755);
     t_run = t0;
@@ -1077,7 +1078,16 @@ int vk_precompile_main(const char *root) {
     if (gf_is_package()) list_package(gf_pkg_node(romfs), romfs);
     else list_dir(romfs);
     files_total = npaths;
-    if (!npaths) { rt_logf("[precompile] no shader files under %s%c", romfs, 10); return 1; }
+    if (!npaths) {
+        uint64_t scan_failures = atomic_load(&n_scan_failed);
+        if (scan_failures) {  // (a missing/corrupt romfs is unreadable, not a stale cache the callers should retry forever)
+            printf("[precompile] cannot read the game files under %s: %llu scan failures and no shader files found%c",
+                   root, (unsigned long long)scan_failures, 10);
+            return 2;
+        }
+        rt_logf("[precompile] no shader files under %s%c", romfs, 10);
+        return 1;
+    }
     qsort(paths, npaths, sizeof *paths, path_cmp);
     { const char *e = getenv("XCDE_PRECOMPILE_LIBS"); use_libs = !e || atoi(e) != 0; }
     setenv("XCDE_PRECOMPILING", "1", 1);  // (shaders.c: no cache-miss log lines)

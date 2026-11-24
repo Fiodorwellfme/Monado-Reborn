@@ -486,13 +486,20 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
   remain best-effort; their failures are reported without forcing a full rerun on every launch. `n_built` counts base
   programs again, and incompatible variant-record sizes are skipped before creating jobs.
 - `--precompile-status` returns 3 when SPIR-V persistence is disabled. The launcher and RecompLauncher builder show that
-  precompilation does not apply and skip the repeated full pass; a manual precompile still runs when requested.
-- The scan budget has a separate large-file slot counter, so small files no longer delay a `>64 MiB` container. Directory
-  and metadata failures make the signature/scan incomplete instead of being silently skipped.
+  precompilation does not apply and skip the repeated full pass; the explicit Precompile button is disabled and
+  `pc_start` refuses to spawn the same no-stamp run.
+- The scan budget has a separate large-file slot counter, so small files no longer delay a `>64 MiB` container. Unreadable
+  shader containers and directories make the signature/scan incomplete instead of being silently skipped; unrelated
+  dangling links are skipped with a warning.
 - A shared `xcde_utf8_file_info()` helper gives the game-file reader, signature walk, precompile listing and cache validator
   64-bit metadata on Windows. The native UTF-8 path test now creates a sparse 3 GiB file and verifies its reported size.
 - `XCDE_GLSL_DIR` hashes the override `.glsl` bytes as well as the directory path, so in-place debug-shader edits invalidate
-  the precompile signature.
-- Validation: 248 unit tests (10 skipped), the Linux native suite, focused Clang/GCC signature and sparse-file tests,
+  the precompile signature. Non-regular or unreadable `.glsl` entries are skipped with a warning, matching exec.c,
+  which ignores overrides it cannot read; regular files of any size are hashed.
+- POSIX `xcde_opendir` now checks `readdir`'s error state, so a partial directory listing cannot make the signature or the
+  precompile scan look complete. The signature walk and precompile listing share one path limit.
+- A precompile run that finds no shader files but recorded scan failures (a missing/corrupt package `romfs`, for example)
+  now exits 2 as unreadable instead of 1 as stale, so the launcher and builder do not retry a doomed run.
+- Validation: 250 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
   targeted Clang syntax checks for `precompile.c`/`exec.c`, and the Linux launcher syntax check pass. Windows execution is
   still pending; the sparse-file test is included in the Windows validation suite.

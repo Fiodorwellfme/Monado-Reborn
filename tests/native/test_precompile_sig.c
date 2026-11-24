@@ -101,6 +101,13 @@ static void remove_file(const char *rel) {
     path_of(p, sizeof p, rel);
     remove(p);
 }
+#ifndef _WIN32
+static bool make_symlink(const char *target, const char *rel) {
+    char p[1200];
+    path_of(p, sizeof p, rel);
+    return symlink(target, p) == 0;
+}
+#endif
 static bool hex16(const char *s) {
     if (strlen(s) != 16) return false;
     for (int i = 0; i < 16; i++) if (!isxdigit((unsigned char)s[i]) || isupper((unsigned char)s[i])) return false;
@@ -141,6 +148,20 @@ int main(void) {
     CHECK(hex16(a));
     CHECK(sig_of("dump", b));
     CHECK(!strcmp(a, b));
+
+#ifndef _WIN32
+    // An unrelated dangling link (a broken mod file) is not a shader container: the scan never reads it, so it must not
+    // turn the whole dump "unreadable". A broken shader container is different: it could have held programs.
+    CHECK(make_symlink("/no/such/target", "dump/romfs/broken.txt"));
+    CHECK(sig_of("dump", b));
+    CHECK(!strcmp(a, b));
+    CHECK(make_symlink("/no/such/target", "dump/romfs/broken.wimdo"));
+    CHECK(!sig_of("dump", b));
+    remove_file("dump/romfs/broken.wimdo");
+    remove_file("dump/romfs/broken.txt");
+    CHECK(sig_of("dump", b));
+    CHECK(!strcmp(a, b));
+#endif
 
     // A changed file (same name, other content/size).
     write_file("dump/romfs/a.wimdo", "a longer content", 15);
@@ -222,13 +243,18 @@ int main(void) {
     }
 
     // XCDE_GLSL_DIR's path is an environment input, but an in-place override edit must invalidate the signature too.
+    // exec.c ignores an override it cannot read (a directory, a dangling link, an unreadable file); the signature does too.
     CHECK(sig_of("dump", a));
     char overrides[1200], override_file[1200];
     path_of(overrides, sizeof overrides, "overrides");
     path_of(override_file, sizeof override_file, "overrides/test_fs.glsl");
     CHECK(MKDIR(overrides) == 0);
+    CHECK(make_dir("overrides/ignored.glsl"));
     write_file("overrides/test_fs.glsl", "one", 3);
     CHECK(set_mtime(override_file, 1234567890) == 0);
+#ifndef _WIN32
+    CHECK(make_symlink("/no/such/target", "overrides/broken.glsl"));
+#endif
     set_env("XCDE_GLSL_DIR", overrides);
     CHECK(sig_of("dump", a));
     write_file("overrides/test_fs.glsl", "two", 3);
@@ -237,6 +263,13 @@ int main(void) {
     CHECK(strcmp(a, b) != 0);
     clear_env();
     remove_file("overrides/test_fs.glsl");
+#ifndef _WIN32
+    remove_file("overrides/broken.glsl");
+#endif
+    {
+        char p[1200];
+        path_of(p, sizeof p, "overrides/ignored.glsl"); RMDIR(p);
+    }
     RMDIR(overrides);
 
     // The shipped variant seed: new recorded variants mean new jobs to warm.

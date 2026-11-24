@@ -206,15 +206,33 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn('if (!dd)', listing)
         self.assertIn('scan_failure(dir, why)', listing)  # opendir/enumeration failure
         self.assertIn('if (!xcde_utf8_file_info(p, &fi))', listing)
-        self.assertIn('scan_failure(p, "metadata could not be read")', listing)  # stat/metadata failure
+        # A shader container (or a directory that could contain one) must be readable; an unrelated dangling link is skipped.
+        self.assertIn('if (e->d_type == DT_DIR || wanted(e->d_name)) scan_failure(p, "metadata could not be read")', listing)
+        self.assertIn('skipping unreadable entry %s: not a shader container', listing)
         self.assertIn('if (fi.isdir) list_dir(p)', listing)
         self.assertIn('else if (fi.isreg && wanted(e->d_name)) add_path(p, fi.size)', listing)
+        self.assertIn('static bool wanted(const char *name) { return vk_precompile_is_shader_container(name); }', precompile)
         for obsolete in ('xcde_utf8_stat(', 'struct stat', 'S_ISDIR', 'S_ISREG'):
             self.assertNotIn(obsolete, listing)
         failure = precompile[precompile.index('static void scan_failure('):precompile.index('// The scan visits')]
         self.assertIn('atomic_fetch_add(&n_scan_failed, 1)', failure)
         main = precompile[precompile.index('int vk_precompile_main('):]
         self.assertIn('if (scan_failed || n_failed)', main)  # a partial listing cannot leave a current stamp
+        # No paths and recorded scan failures is an unreadable dump (2), not a stale cache (1) the callers retry forever.
+        empty = main.index('if (!npaths) {')
+        empty_end = main.index('qsort(paths', empty)
+        self.assertIn('atomic_load(&n_scan_failed)', main[empty:empty_end])
+        self.assertIn('return 2;', main[empty:empty_end])
+
+    def test_the_signature_and_scan_share_one_path_limit(self):
+        header = (ROOT / 'runtime/nvn/vulkan/precompile_sig.h').read_text(encoding='utf-8')
+        self.assertIn('#define XCDE_PRECOMPILE_PATH_MAX 2048', header)
+        for rel in ('runtime/nvn/vulkan/precompile_sig.c', 'runtime/nvn/vulkan/precompile.c'):
+            source = (ROOT / rel).read_text(encoding='utf-8')
+            self.assertIn('XCDE_PRECOMPILE_PATH_MAX', source, rel)
+        # The two walks must not disagree again (a path the signature accepts but the listing rejects never stamps).
+        signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
+        self.assertNotIn('char p[2048], r[2048]', signature)
 
     def test_variant_files_must_match_the_exec_record_abi_before_jobs_are_created(self):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')

@@ -393,8 +393,12 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('if (then_play) g_pc_play_now = true;', start)
         self.assertIn('return false;', start)
         self.assertIn('return true;', start)
+        self.assertIn('if (fresh) pc_forget();', start)  # (re-ask under the current diagnostics environment)
+        self.assertIn('if (pc_status() == PC_STATUS_DISABLED)', start)  # (the --shot path must not run a no-stamp pass)
+        self.assertIn('g_status = pc_idle_text(PC_STATUS_DISABLED);', start)
         self.assertIn('if (pc_start(false, true) && retry)', launcher)
         self.assertIn('if (pc_start(then_play))', launcher)
+        self.assertIn('frame_pc_status == PC_STATUS_DISABLED', launcher)  # (the explicit button is disabled)
 
     def test_the_shader_precompile_bar_covers_the_four_passes(self):
         # T281: the progress file is "<phase> <overall done> <overall total> <this pass done> <this pass total>" over

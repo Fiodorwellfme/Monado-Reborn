@@ -77,6 +77,15 @@ class RuntimeUtf8Paths(unittest.TestCase):
         self.assertHas("static inline void xcde_seekdir(", shim, "seekdir")
         self.assertHas("FILE_ATTRIBUTE_DIRECTORY", shim, "d_type from the attributes")
 
+    def test_the_posix_directory_listing_reports_read_errors(self):
+        # A partial readdir() must not look like the whole folder: the signature and the shader scan would otherwise
+        # stamp an incomplete walk as complete (the Windows FindNextFileW branch already checks its error).
+        shim = text("runtime/platform/dir_utf8.h")
+        posix = shim[shim.index('static inline XcdeDir *xcde_opendir(const char *path) {\n    DIR *dir;'):]
+        self.assertIn('errno = 0;', posix)
+        self.assertIn('if (errno) {', posix)
+        self.assertIn('int err = errno;', posix)
+
     def test_the_runtime_path_helpers_are_wide_on_windows(self):
         header = text("runtime/host/utf8_path.h")
         for wide in ("wstat(", "_wchdir(", "_wgetcwd(", "_wmkdir(", "GetEnvironmentVariableW(", "LoadLibraryW(",

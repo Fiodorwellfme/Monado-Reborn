@@ -263,8 +263,10 @@ Details and the reporter's log evidence: [CHANGELOG](dev/CHANGELOG.md).
   fingerprint and artifacts revision, the environment switches by presence and value - the SPIR-V options, the
   translator's GLSL switches and the precompile's pass switches -, the game-file set by relative name/size/mtime or the
   `.nup`'s 64-bit size/mtime, the shipped variant seed). A root must be a dump folder with a readable `romfs/` or a
-  `.nup` package file; an unreadable directory or entry inside romfs makes the signature unreadable rather than describing
-  a partial scan. `XCDE_GLSL_DIR` override bytes are hashed as well as its path.
+  `.nup` package file; an unreadable shader container or directory inside romfs makes the signature unreadable rather
+  than describing a partial scan. An unreadable entry that is neither (a dangling link in a mod, say) is skipped with a
+  warning, and ignored `.glsl` override entries are skipped too. `XCDE_GLSL_DIR` override bytes are hashed as well as
+  its path.
 - `runtime/nvn/vulkan/precompile.c`: `sig` line in `cache/precompile_done.txt` (the `exe` line is gone), early exit
   for a current cache, `XCDE_PRECOMPILE_FORCE`, the `--precompile-status` answer and the build workers start after the
   scan (the named-input masks are final then: a deterministic, converging SPIR-V cache).

@@ -155,9 +155,19 @@ static inline XcdeDir *xcde_opendir(const char *path) {
     if (!dir) return NULL;
     d = (XcdeDir *)calloc(1, sizeof *d);
     if (!d) { closedir(dir); errno = ENOMEM; return NULL; }
-    while ((e = readdir(dir)) != NULL) {
+    for (;;) {
+        errno = 0;  // (readdir reports the end with NULL and leaves errno alone; a real error must not look complete)
+        e = readdir(dir);
+        if (!e) break;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         if (!xcde_dir_add(d, e->d_name, e->d_type)) { closedir(dir); xcde_closedir(d); errno = ENOMEM; return NULL; }
+    }
+    if (errno) {
+        int err = errno;
+        closedir(dir);
+        xcde_closedir(d);
+        errno = err;
+        return NULL;  // (a partial listing must not be reported as the whole folder)
     }
     closedir(dir);
     return d;

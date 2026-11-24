@@ -26,8 +26,9 @@
 //  - the shipped variant seed (XCDE_VARIANTS_SEED or data/variants_seed.bin): size and mtime. New recorded variants
 //    mean new jobs to warm.
 // A root is a dump folder with a readable romfs/ or a .nup package file; anything else is "unreadable" (2), not "stale".
-// An unreadable directory or entry inside romfs also makes the signature unreadable: a partial walk must not describe a
-// complete cache.
+// An unreadable shader container or directory inside romfs also makes the signature unreadable: a partial walk must not
+// describe a complete cache. An unreadable entry that is neither a shader container nor a directory (a dangling link in
+// a mod, say) is skipped with a warning: it cannot add programs to the shader cache.
 //
 // Not covered: cache/variants.bin (the player's own recordings: it grows while playing, so it must not invalidate the
 // cache) and the graphics driver, including the Vulkan route / selected adapter from xcde.ini (the driver's shader
@@ -85,9 +86,19 @@ static bool is_package_file(const char *path) {
     return yes;
 }
 
+// The same list precompile.c scans (wishp/shader libraries and the model/effect containers that hold them).
+bool vk_precompile_is_shader_container(const char *name) {
+    const char *e = strrchr(name, '.');
+    if (!e) return false;
+    static const char *ext[] = {".wishp", ".wimdo", ".wismt", ".wismda", ".wiefb", NULL};
+    for (int i = 0; ext[i]; i++) if (!strcmp(e, ext[i])) return true;
+    return false;
+}
+
 // Every file under dir, by relative name (rel): added to *sum, so the folder enumeration order does not matter. An
-// unreadable directory or entry makes the signature unreadable rather than silently describing an incomplete scan; the
-// depth cap turns a symlink loop into "unreadable" instead of a stack exhaustion.
+// unreadable shader container or directory makes the signature unreadable rather than silently describing an incomplete
+// scan; an unreadable non-container entry (a dangling mod link) is skipped, since the scan never reads it. The depth cap
+// turns a symlink loop into "unreadable" instead of a stack exhaustion.
 #define MIX_DIR_MAX_DEPTH 64
 static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, uint64_t *files) {
     if (depth > MIX_DIR_MAX_DEPTH) return false;
@@ -97,11 +108,15 @@ static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, 
     XcdeDirent *e;
     while ((e = xcde_readdir(dd))) {
         if (e->d_name[0] == '.') continue;
-        char p[2048], r[2048];
+        char p[XCDE_PRECOMPILE_PATH_MAX], r[XCDE_PRECOMPILE_PATH_MAX];
         int np = snprintf(p, sizeof p, "%s/%s", dir, e->d_name), nr = snprintf(r, sizeof r, "%s/%s", rel, e->d_name);
         if (np < 0 || (size_t)np >= sizeof p || nr < 0 || (size_t)nr >= sizeof r) { ok = false; break; }
         XcdeFileInfo fi;
-        if (!xcde_utf8_file_info(p, &fi)) { ok = false; break; }
+        if (!xcde_utf8_file_info(p, &fi)) {
+            if (e->d_type == DT_DIR || vk_precompile_is_shader_container(e->d_name)) { ok = false; break; }
+            fprintf(stderr, "[precompile] skipping unreadable entry %s: not a shader container%c", p, 10);
+            continue;
+        }
         if (fi.isdir) {
             if (!mix_dir(p, r, depth + 1, sum, files)) { ok = false; break; }
         } else if (fi.isreg) {
@@ -115,35 +130,48 @@ static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, 
 
 // XCDE_GLSL_DIR is a debug override directory read directly by exec.c's compile_program. Its path is already in the
 // environment signature; hash the .glsl bytes too so an in-place edit cannot leave an old precompile looking current.
+// exec.c ignores an override it cannot read (a directory, a dangling link, an unreadable file): skip those here as
+// well, with a warning, instead of making every shader look unreadable. The bytes are streamed, so any file size works.
 static bool mix_glsl_dir(const char *dir, uint64_t *sum, uint64_t *files) {
     XcdeDir *dd = xcde_opendir(dir);
     if (!dd) return errno == ENOENT || !*dir;  // a missing override directory simply supplies no files
-    bool ok = true;
     XcdeDirent *e;
     while ((e = xcde_readdir(dd))) {
         size_t n = strlen(e->d_name);
         if (e->d_name[0] == '.' || n < 5 || strcmp(e->d_name + n - 5, ".glsl")) continue;
-        char path[2048];
+        char path[XCDE_PRECOMPILE_PATH_MAX];
         int len = snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        if (len < 0 || (size_t)len >= sizeof path) { ok = false; break; }
+        if (len < 0 || (size_t)len >= sizeof path) {
+            fprintf(stderr, "[precompile] ignoring XCDE_GLSL_DIR entry %s/%s: path is too long%c", dir, e->d_name, 10);
+            continue;
+        }
         XcdeFileInfo fi;
-        if (!xcde_utf8_file_info(path, &fi) || !fi.isreg || fi.size > (16ull << 20)) { ok = false; break; }
+        if (!xcde_utf8_file_info(path, &fi) || !fi.isreg) {
+            fprintf(stderr, "[precompile] ignoring XCDE_GLSL_DIR entry %s: not a readable regular file%c", path, 10);
+            continue;
+        }
         FILE *f = xcde_utf8_fopen(path, "rb");
-        if (!f) { ok = false; break; }
+        if (!f) {
+            fprintf(stderr, "[precompile] ignoring XCDE_GLSL_DIR entry %s: it could not be opened%c", path, 10);
+            continue;
+        }
         uint64_t h = mix(0xcbf29ce484222325ull, e->d_name, n);
         h = mix_stat(h, fi.size, fi.mtime);
         uint8_t buf[8192];
         size_t got;
         uint64_t total = 0;
         while ((got = fread(buf, 1, sizeof buf, f)) != 0) { h = mix(h, buf, got); total += got; }
-        ok = !ferror(f) && total == fi.size;
+        bool ok = !ferror(f) && total == fi.size;
         fclose(f);
-        if (!ok) break;
+        if (!ok) {
+            fprintf(stderr, "[precompile] ignoring XCDE_GLSL_DIR entry %s: it could not be read completely%c", path, 10);
+            continue;
+        }
         *sum += h;
         (*files)++;
     }
     xcde_closedir(dd);
-    return ok;
+    return true;
 }
 
 // Everything that changes what a run warms. Presence AND value: XCDE_FS_OPT= (empty) disables the optimisation, like
@@ -196,8 +224,9 @@ bool vk_precompile_sig(const char *root, char out[17]) {
     }
     uint64_t files = 0;
     if (ri.isdir) {
-        char romfs[2048];
-        if (snprintf(romfs, sizeof romfs, "%s/romfs", root) >= (int)sizeof romfs || !mix_dir(romfs, "", 0, &h, &files)) return false;
+        char romfs[XCDE_PRECOMPILE_PATH_MAX];
+        int n = snprintf(romfs, sizeof romfs, "%s/romfs", root);
+        if (n < 0 || (size_t)n >= sizeof romfs || !mix_dir(romfs, "", 0, &h, &files)) return false;
     } else {  // (a .nup package: the file itself is the game files)
         if (!is_package_file(root)) return false;  // (a plain file is not a game root: unreadable, not stale)
         h = mix_stat(h, ri.size, ri.mtime);
