@@ -262,13 +262,14 @@ def game_executable():
 
 
 # Exit codes of the runtime's `--precompile-status <dump>` mode (runtime/nvn/vulkan/precompile.c).
-PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNREADABLE = 0, 1, 2
+PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNREADABLE, PC_STATUS_DISABLED = 0, 1, 2, 3
 PC_STATUS_TIMEOUT_S = 60  # ([XCDE] T282 review: the walk measured 78-108 ms; this only bounds a hung/locked child)
 
 
 def precompile_status(data_root, exe, dump):
-    """The runtime's answer for cache/precompile_done.txt: 0 current, 1 needs preparing, 2 the game files cannot be read;
-    -1 when it cannot be asked (no runnable executable, timeout, unexpected exit). [XCDE] T282"""
+    """The runtime's answer for cache/precompile_done.txt: 0 current, 1 needs preparing, 2 the game files cannot be read,
+    3 SPIR-V persistence is disabled (precompilation is not applicable); -1 when it cannot be asked (no runnable
+    executable, timeout, unexpected exit). [XCDE] T282"""
     reset_dll_directory()
     flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
     try:
@@ -277,7 +278,7 @@ def precompile_status(data_root, exe, dump):
                               timeout=PC_STATUS_TIMEOUT_S)
     except (OSError, subprocess.TimeoutExpired):
         return -1
-    return done.returncode if done.returncode in (0, 1, 2) else -1
+    return done.returncode if done.returncode in (0, 1, 2, 3) else -1
 
 
 def precompile_is_current(data_root, exe, dump):
@@ -349,6 +350,16 @@ def precompile_shaders(dump):
     if status == PC_STATUS_CURRENT:
         print_progress(1, 'Shaders already prepared')
         return
+    if status == PC_STATUS_DISABLED:
+        print('gamebuild: SPIR-V persistence is disabled (LARECOMP_VK_NO_SPIRV_CACHE); the shader precompile was '
+              'skipped because it does not apply; the game compiles shaders as it reaches them', flush=True)
+        print_progress(1, 'Shaders compile while you play')
+        return
+    if status == -1:  # (timeout, spawn failure or an unexpected exit: a full pass cannot be bounded or trusted)
+        print('gamebuild: could not verify the shader cache (the status probe timed out, could not start, or exited '
+              'unexpectedly); the shader precompile was skipped', flush=True)
+        print_progress(1, 'Shaders compile while you play')
+        return
     if status == PC_STATUS_UNREADABLE:  # [XCDE] T282 review: the run would exit 2 at once and print only a generic error
         print('gamebuild: the game files cannot be read (the shader precompile was skipped); check the input dump',
               flush=True)
@@ -363,8 +374,14 @@ def precompile_shaders(dump):
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if sys.platform == 'win32' else 0
     last = None
     with (data_root / 'build' / 'last_precompile.log').open('w', encoding='utf-8', errors='replace') as log:
-        process = subprocess.Popen([str(exe), '--precompile', str(dump)], cwd=data_root, stdout=log,
-                                   stderr=subprocess.STDOUT, env=child_environment(), creationflags=flags)
+        try:
+            process = subprocess.Popen([str(exe), '--precompile', str(dump)], cwd=data_root, stdout=log,
+                                       stderr=subprocess.STDOUT, env=child_environment(), creationflags=flags)
+        except OSError as error:
+            print(f'gamebuild: could not start the shader precompile ({error}); the game compiles shaders as it reaches them',
+                  flush=True)
+            print_progress(1, 'Shaders compile while you play')
+            return
         while process.poll() is None:
             time.sleep(0.5)
             try:

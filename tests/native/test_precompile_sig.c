@@ -1,7 +1,7 @@
 // [XCDE] T282: vk_precompile_sig - the signature that decides whether the precompiled shader cache is current. The
-// inputs are the build's translator/SPIR-V compiler fingerprint (XCDE_SHADER_SIG), the revision of exec.c's build path,
-// the environment switches that change the translation/SPIR-V/passes and the game files; the build generates
-// shader_sig.h, this test passes the macro instead.
+// inputs are the build's game-file/translator/replacement-GLSL/SPIR-V compiler fingerprint (XCDE_SHADER_SIG), the
+// revision of exec.c's build path, the environment switches that change translation, replacements, pipeline/layout
+// artifacts or cache modes, and the game files; the build generates shader_sig.h, this test passes the macro instead.
 #ifndef XCDE_SHADER_SIG
 #error "test_precompile_sig needs -DXCDE_SHADER_SIG=... (precompile_sig.c takes it when the build header is absent)"
 #endif
@@ -61,6 +61,23 @@ static int failures;
 
 static char root[1024];
 
+// Keep the test's environment clean even when it inherits a developer's XCDE_* / LARECOMP_* settings.
+static const char *const k_sig_env[] = {
+    "LARECOMP_VK_OPT", "XCDE_FS_OPT", "XCDE_SPIRV_LOOSE", "LARECOMP_VK_NO_SPIRV_CACHE",
+    "XCDE_STATIC_STACKS", "XCDE_RSC_PIXEL", "XCDE_D16_REF", "XCDE_SCALED_GATHER", "LARECOMP_NO_DISCARD",
+    "XCDE_HW_FP16", "XCDE_EARLY_FS", "XCDE_STRUCTURED_CFG", "LARECOMP_SAVE_MSL",
+    "XCDE_BLOOM_PREFILTER", "XCDE_BLOOM_FILTER", "XCDE_GTAO", "XCDE_CHAR_LIGHT", "XCDE_TMAA_TEXEL",
+    "XCDE_GLSL_DIR", "LARECOMP_VK_GPL", "XCDE_VK_GPL", "XCDE_PUSH_DESC", "XCDE_CANON", "XCDE_GPL_RETAIN",
+    "LARECOMP_VK_D24", "XCDE_PRECOMPILE_LIBS", "XCDE_PRECOMPILE_PIPELINES",
+};
+static const struct { const char *name, *value; } k_artifact_env[] = {
+    {"LARECOMP_VK_GPL", "0"}, {"XCDE_VK_GPL", "1"},
+    {"XCDE_BLOOM_PREFILTER", "1"}, {"XCDE_BLOOM_FILTER", "0"}, {"XCDE_GTAO", "0"},
+    {"XCDE_CHAR_LIGHT", "0.5"}, {"XCDE_TMAA_TEXEL", "0"}, {"XCDE_GLSL_DIR", "override-glsl"},
+    {"XCDE_PUSH_DESC", "0"}, {"XCDE_CANON", "0"}, {"XCDE_GPL_RETAIN", "1"}, {"LARECOMP_VK_D24", "0"},
+    {"LARECOMP_SAVE_MSL", "1"}, {"XCDE_SPIRV_LOOSE", "1"}, {"LARECOMP_VK_NO_SPIRV_CACHE", "1"},
+};
+
 static void path_of(char *out, size_t cap, const char *rel) { snprintf(out, cap, "%s/%s", root, rel); }
 static void write_file(const char *rel, const char *data, size_t n) {
     char p[1200];
@@ -84,16 +101,20 @@ static void remove_file(const char *rel) {
     path_of(p, sizeof p, rel);
     remove(p);
 }
+#ifndef _WIN32
+static bool make_symlink(const char *target, const char *rel) {
+    char p[1200];
+    path_of(p, sizeof p, rel);
+    return symlink(target, p) == 0;
+}
+#endif
 static bool hex16(const char *s) {
     if (strlen(s) != 16) return false;
     for (int i = 0; i < 16; i++) if (!isxdigit((unsigned char)s[i]) || isupper((unsigned char)s[i])) return false;
     return true;
 }
 static void clear_env(void) {
-    set_env("XCDE_FS_OPT", NULL);
-    set_env("LARECOMP_VK_OPT", NULL);
-    set_env("XCDE_STATIC_STACKS", NULL);
-    set_env("XCDE_PRECOMPILE_PIPELINES", NULL);
+    for (size_t i = 0; i < sizeof k_sig_env / sizeof k_sig_env[0]; i++) set_env(k_sig_env[i], NULL);
 }
 
 int main(void) {
@@ -127,6 +148,46 @@ int main(void) {
     CHECK(hex16(a));
     CHECK(sig_of("dump", b));
     CHECK(!strcmp(a, b));
+
+#ifndef _WIN32
+    // An unrelated dangling link (a broken mod file) is not a shader container: the scan never reads it, so it must not
+    // turn the whole dump "unreadable". A broken shader container is different: it could have held programs.
+    CHECK(make_symlink("/no/such/target", "dump/romfs/broken.txt"));
+    CHECK(sig_of("dump", b));
+    CHECK(!strcmp(a, b));
+    CHECK(make_symlink("/no/such/target", "dump/romfs/broken.wimdo"));
+    CHECK(!sig_of("dump", b));
+    remove_file("dump/romfs/broken.wimdo");
+    remove_file("dump/romfs/broken.txt");
+    CHECK(sig_of("dump", b));
+    CHECK(!strcmp(a, b));
+
+    // A symlink loop is not a dangling link: stat fails ELOOP, and the walk must stay unreadable.
+    CHECK(make_symlink("loop", "dump/romfs/loop"));
+    CHECK(!sig_of("dump", b));
+    remove_file("dump/romfs/loop");
+
+    // A link into an inaccessible directory is not provably irrelevant either (stat fails EACCES).
+    CHECK(make_dir("locked"));
+    CHECK(make_dir("locked/inner"));
+    char locked[1200], locked_dir[1200];
+    path_of(locked, sizeof locked, "locked/inner");
+    path_of(locked_dir, sizeof locked_dir, "locked");
+    CHECK(make_symlink(locked, "dump/romfs/locked"));
+    if (geteuid() != 0) {
+        CHECK(chmod(locked_dir, 0000) == 0);
+        CHECK(!sig_of("dump", b));
+        CHECK(chmod(locked_dir, 0755) == 0);
+    }
+    remove_file("dump/romfs/locked");
+    {
+        char p[1200];
+        path_of(p, sizeof p, "locked/inner"); RMDIR(p);
+        path_of(p, sizeof p, "locked"); RMDIR(p);
+    }
+    CHECK(sig_of("dump", b));
+    CHECK(!strcmp(a, b));
+#endif
 
     // A changed file (same name, other content/size).
     write_file("dump/romfs/a.wimdo", "a longer content", 15);
@@ -195,6 +256,74 @@ int main(void) {
     CHECK(strcmp(a, b) != 0);
     clear_env();
 
+    // xcde.ini's GPU pipeline policy: compatibility / gpu_gpl=off makes the precompile warm whole pipelines instead of
+    // libraries. The auto policy must equal the convenience wrapper; every other value must change the signature.
+    char dump[1200];
+    path_of(dump, sizeof dump, "dump");
+    CHECK(sig_of("dump", a));
+    CHECK(vk_precompile_sig_policy(dump, XCDE_SIG_GPU_GPL_AUTO, XCDE_SIG_GPU_PROFILE_AUTO, b));
+    CHECK(!strcmp(a, b));
+    CHECK(vk_precompile_sig_policy(dump, 0, 0, b));
+    CHECK(strcmp(a, b) != 0);
+    CHECK(vk_precompile_sig_policy(dump, 0, 1, b));
+    CHECK(strcmp(a, b) != 0);
+    CHECK(vk_precompile_sig_policy(dump, 1, 0, b));
+    CHECK(strcmp(a, b) != 0);
+    CHECK(vk_precompile_sig_policy(dump, XCDE_SIG_GPU_GPL_AUTO, XCDE_SIG_GPU_PROFILE_AUTO, b));
+    CHECK(!strcmp(a, b));
+
+    // Every artifact-affecting switch added by the coverage audit independently changes the signature. One
+    // representative value per switch is enough: the unset/empty/value contract is exercised above.
+    CHECK(sig_of("dump", a));
+    for (size_t i = 0; i < sizeof k_artifact_env / sizeof k_artifact_env[0]; i++) {
+        set_env(k_artifact_env[i].name, k_artifact_env[i].value);
+        CHECK(sig_of("dump", b));
+        CHECK(strcmp(a, b) != 0);
+        set_env(k_artifact_env[i].name, NULL);
+        CHECK(sig_of("dump", b));
+        CHECK(!strcmp(a, b));  // (back to the baseline)
+    }
+
+    // XCDE_GLSL_DIR's path is an environment input, but an in-place override edit must invalidate the signature too.
+    // exec.c ignores an override it cannot read (a directory, a dangling link, an unreadable file); the signature does too.
+    CHECK(sig_of("dump", a));
+    char overrides[1200], override_file[1200];
+    path_of(overrides, sizeof overrides, "overrides");
+    path_of(override_file, sizeof override_file, "overrides/test_fs.glsl");
+    CHECK(MKDIR(overrides) == 0);
+    CHECK(make_dir("overrides/1234_fs.glsl"));  // (the exact runtime override name shape: exec.c must ignore it too)
+    write_file("overrides/test_fs.glsl", "one", 3);
+    CHECK(set_mtime(override_file, 1234567890) == 0);
+#ifndef _WIN32
+    CHECK(make_symlink("/no/such/target", "overrides/dead_vs.glsl"));
+#endif
+    set_env("XCDE_GLSL_DIR", overrides);
+    CHECK(sig_of("dump", a));
+    write_file("overrides/test_fs.glsl", "two", 3);
+    CHECK(set_mtime(override_file, 1234567890) == 0);  // same size and mtime: only the bytes changed
+    CHECK(sig_of("dump", b));
+    CHECK(strcmp(a, b) != 0);
+    clear_env();
+    remove_file("overrides/test_fs.glsl");
+#ifndef _WIN32
+    remove_file("overrides/dead_vs.glsl");
+#endif
+    {
+        char p[1200];
+        path_of(p, sizeof p, "overrides/1234_fs.glsl"); RMDIR(p);
+    }
+    RMDIR(overrides);
+
+    // A path that names a file is not an override directory: exec.c ignores it, so the signature must not turn the whole
+    // dump unreadable (the same applies to a missing directory, tested above through the env-value loop).
+    write_file("not-a-dir", "x", 1);
+    char not_a_dir[1200];
+    path_of(not_a_dir, sizeof not_a_dir, "not-a-dir");
+    set_env("XCDE_GLSL_DIR", not_a_dir);
+    CHECK(sig_of("dump", a));
+    clear_env();
+    remove_file("not-a-dir");
+
     // The shipped variant seed: new recorded variants mean new jobs to warm.
     CHECK(sig_of("dump", a));
     write_file("seed.bin", "a bigger seed file", 18);
@@ -207,6 +336,8 @@ int main(void) {
     CHECK(!vk_precompile_sig(missing, a));
 
     // Clean up (best effort: the test must not leave files behind).
+    remove_file("overrides/test_fs.glsl");
+    RMDIR(overrides);
     remove_file("dump/romfs/e.wimdo");
     remove_file("dump/romfs/c.wishp");
     remove_file("dump/romfs/sub/b.wismt");

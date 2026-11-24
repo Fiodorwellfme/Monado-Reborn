@@ -30,19 +30,7 @@
 
 // [XCDE] T278: the CRT's opendir() set errno (fs.c's OpenDirectory reports it to the game). FindFirstFileW does not, so
 // map its error the same way (a path that names a file is ERROR_DIRECTORY).
-static inline void xcde_dir_errno_from_win32(DWORD error) {
-    switch (error) {
-    case ERROR_FILE_NOT_FOUND:
-    case ERROR_PATH_NOT_FOUND:
-    case ERROR_INVALID_NAME: errno = ENOENT; break;
-    case ERROR_ACCESS_DENIED:
-    case ERROR_SHARING_VIOLATION: errno = EACCES; break;
-    case ERROR_DIRECTORY: errno = ENOTDIR; break;
-    case ERROR_NOT_ENOUGH_MEMORY:
-    case ERROR_OUTOFMEMORY: errno = ENOMEM; break;
-    default: errno = EIO; break;
-    }
-}
+static inline void xcde_dir_errno_from_win32(DWORD error) { xcde_errno_from_win32(error); }
 #else
 #include <dirent.h>
 #endif
@@ -155,9 +143,19 @@ static inline XcdeDir *xcde_opendir(const char *path) {
     if (!dir) return NULL;
     d = (XcdeDir *)calloc(1, sizeof *d);
     if (!d) { closedir(dir); errno = ENOMEM; return NULL; }
-    while ((e = readdir(dir)) != NULL) {
+    for (;;) {
+        errno = 0;  // (readdir reports the end with NULL and leaves errno alone; a real error must not look complete)
+        e = readdir(dir);
+        if (!e) break;
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         if (!xcde_dir_add(d, e->d_name, e->d_type)) { closedir(dir); xcde_closedir(d); errno = ENOMEM; return NULL; }
+    }
+    if (errno) {
+        int err = errno;
+        closedir(dir);
+        xcde_closedir(d);
+        errno = err;
+        return NULL;  // (a partial listing must not be reported as the whole folder)
     }
     closedir(dir);
     return d;

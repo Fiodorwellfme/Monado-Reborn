@@ -108,17 +108,30 @@ static std::string U8(const wchar_t *s) {  // UTF-16 -> UTF-8 (a wide directory 
     return std::string(b.data());
 }
 // getenv()/SetEnvironmentVariableA also convert through the code page: a PATH with the install folder in it would point
-// at a folder that does not exist, and the game would not find the package's DLLs.
-static std::string env_u8(const char *name) {
+// at a folder that does not exist, and the game would not find the package's DLLs. env_get_u8 also distinguishes an
+// unset variable from a set-but-empty one, which apply_env must preserve when a Diagnostics row is removed.
+static bool env_get_u8(const char *name, std::string &value) {
     std::wstring wname = W(name);
     DWORD n = GetEnvironmentVariableW(wname.c_str(), NULL, 0);
-    if (!n) return std::string();
+    if (!n) return false;
     std::vector<wchar_t> w(n, L'\0');
-    if (!GetEnvironmentVariableW(wname.c_str(), w.data(), n)) return std::string();
-    return U8(w.data());
+    // A present-but-empty variable makes the second call return zero characters without an error. Clear the stale
+    // ERROR_ENVVAR_NOT_FOUND from the sizing call so zero + ERROR_SUCCESS can be distinguished from disappearance.
+    SetLastError(ERROR_SUCCESS);
+    DWORD got = GetEnvironmentVariableW(wname.c_str(), w.data(), n);
+    if (!got && GetLastError() != ERROR_SUCCESS) return false;
+    value = got ? U8(w.data()) : std::string();
+    return true;
+}
+static std::string env_u8(const char *name) {
+    std::string value;
+    return env_get_u8(name, value) ? value : std::string();
 }
 static void env_set_u8(const char *name, const std::string &value) {
     SetEnvironmentVariableW(W(name).c_str(), W(value).c_str());
+}
+static void env_unset_u8(const char *name) {
+    SetEnvironmentVariableW(W(name).c_str(), nullptr);
 }
 static std::wstring env_w(const wchar_t *name) {  // (PATH itself: wide so its entries survive the conversion)
     DWORD n = GetEnvironmentVariableW(name, NULL, 0);
@@ -134,11 +147,18 @@ static void shell_open_url(const std::string &url) {  // (as it is: "https://", 
     ShellExecuteW(NULL, L"open", W(url).c_str(), NULL, NULL, SW_SHOWNORMAL);
 }
 #else
-static std::string env_u8(const char *name) {
+static bool env_get_u8(const char *name, std::string &value) {
     const char *v = getenv(name);
-    return v ? std::string(v) : std::string();
+    if (!v) return false;
+    value = v;
+    return true;
+}
+static std::string env_u8(const char *name) {
+    std::string value;
+    return env_get_u8(name, value) ? value : std::string();
 }
 static void env_set_u8(const char *name, const std::string &value) { setenv(name, value.c_str(), 1); }
+static void env_unset_u8(const char *name) { unsetenv(name); }
 #endif
 
 // ------------------------------------------------------------------ settings (same keys as settings_ini.c)
@@ -501,6 +521,12 @@ static const char *const k_en[][2] = {
     {"Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)", "The jobs that failed are retried in this pass (failed list cleared)"},
     {"El controlador gráfico falló en un shader: se salta y se sigue (intento ", "The graphics driver failed on a shader: it is skipped (attempt "},
     {"Shaders precompilados", "Shaders precompiled"},
+    {"No se pudo verificar la caché de shaders. JUGAR reintenta; el juego puede compilarlos según los necesita.",
+     "Could not verify the shader cache. PLAY retries; the game can compile shaders as it reaches them."},
+    {"No se pudieron leer los archivos del juego; se omitió la precompilación de shaders.",
+     "The game files could not be read, so shader precompilation was skipped."},
+    {"La persistencia de SPIR-V está desactivada (LARECOMP_VK_NO_SPIRV_CACHE): la precompilación no se aplica y el juego compila los shaders al jugar.",
+     "SPIR-V persistence is disabled (LARECOMP_VK_NO_SPIRV_CACHE): precompilation does not apply and the game compiles shaders while you play."},
     {"La precompilación falló (registro: build/last_precompile.log)", "Precompilation failed (log: build/last_precompile.log)"},
     {"No hay nada que reportar todavía (ni logs ni xcde.ini)", "Nothing to report yet (no logs or xcde.ini)"},
     {"No se pudo crear el reporte (falta tar.exe de Windows)", "Could not create the report (Windows' tar.exe is missing)"},
@@ -614,10 +640,48 @@ static bool env_name_valid(const char *s) {
     for (s++; *s; s++) if (!(isalnum((unsigned char)*s) || *s == '_')) return false;
     return true;
 }
+// Windows environment names are case-insensitive; POSIX names are not. Keep one original per name on both hosts.
+static bool env_name_equal(const char *a, const char *b) {
+#ifdef _WIN32
+    return _stricmp(a, b) == 0;
+#else
+    return strcmp(a, b) == 0;
+#endif
+}
+struct AppliedEnv { std::string name; bool was_set = false; std::string value; };
+static std::vector<AppliedEnv> g_applied_env;
+static const EnvVar *env_wanted(const char *name) {
+    const EnvVar *wanted = nullptr;
+    for (int i = 0; i < g.nenv; i++)
+        if (env_name_valid(g.env[i].name) && env_name_equal(g.env[i].name, name)) wanted = &g.env[i];
+    return wanted;  // (the last duplicate row wins, as when the rows are applied)
+}
+static AppliedEnv *env_applied(const char *name) {
+    for (AppliedEnv &applied : g_applied_env) if (env_name_equal(applied.name.c_str(), name)) return &applied;
+    return nullptr;
+}
 static void apply_env() {
+    // A removed (or renamed) row must not leave its override in this process: later status probes and the game inherit
+    // the launcher's environment. Restore the value from before the first apply, including a value that was empty.
+    for (size_t i = 0; i < g_applied_env.size();) {
+        AppliedEnv &applied = g_applied_env[i];
+        if (env_wanted(applied.name.c_str())) { i++; continue; }
+        if (applied.was_set) env_set_u8(applied.name.c_str(), applied.value);
+        else env_unset_u8(applied.name.c_str());
+        g_applied_env.erase(g_applied_env.begin() + i);
+    }
     for (int i = 0; i < g.nenv; i++) {
-        if (!env_name_valid(g.env[i].name) || !g.env[i].name[0]) continue;
-        env_set_u8(g.env[i].name, g.env[i].value);
+        const char *name = g.env[i].name;
+        if (!env_name_valid(name)) continue;
+        AppliedEnv *applied = env_applied(name);
+        if (!applied) {
+            AppliedEnv original;
+            original.name = name;
+            original.was_set = env_get_u8(name, original.value);
+            g_applied_env.push_back(original);
+            applied = &g_applied_env.back();
+        }
+        env_set_u8(name, g.env[i].value);
     }
 }
 static void load_env() {
@@ -1040,11 +1104,16 @@ static std::string g_pc_text;
 // targets` (runtime/nvn/vulkan/precompile_sig.c) compares the translator/SPIR-V compiler fingerprint, the environment
 // switches, the precompile's pass switches and the game files with the stamp's `sig` line, without scanning or starting
 // Vulkan: a rebuild that cannot change the shaders (launcher, UI, gameplay code) keeps the precompiled cache, which used
-// to be redone after every build. The answer is memoized (pc_done is asked every frame); pc_forget drops it when the
-// executable or the game files may have changed (a precompile ended, the builder made the executable, the dump was
-// switched, the settings or the environment rows were edited).
-static int g_pc_current = -1;  // -1: not asked yet, 0: needs preparing, 1: current
-static void pc_forget() { g_pc_current = -1; }
+// to be redone after every build. CURRENT and STALE are memoized; UNKNOWN is kept distinct and retried after a short
+// backoff when the probe itself was quick, or only by PLAY when it was slow, never reported as prepared. pc_forget drops
+// the memo when the executable, game files, settings or environment rows may have changed.
+enum { PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNREADABLE, PC_STATUS_DISABLED, PC_STATUS_UNKNOWN };
+static constexpr Uint64 PC_UNKNOWN_RETRY_MS = 5000;
+static constexpr Uint64 PC_UNKNOWN_SLOW_MS = 1000;  // (a probe this slow must never be retried automatically)
+static int g_pc_current = -1;  // -1: not asked yet; otherwise one of PC_STATUS_*
+static Uint64 g_pc_retry_at;
+static bool g_pc_no_auto_retry;  // UNKNOWN after a slow/hung probe: only PLAY or another explicit action retries
+static void pc_forget() { g_pc_current = -1; g_pc_retry_at = 0; g_pc_no_auto_retry = false; }
 
 // [XCDE] T282 review: the memoized answer must not outlive a rebuilt executable (the base code stat'ed it on every call).
 // A changed exe only drops the memo: the next answer still comes from the runtime, so an unrelated rebuild (same
@@ -1060,13 +1129,13 @@ static void pc_check_exe() {
     if (sz != g_pc_exe_size || mt != g_pc_exe_mtime) { g_pc_exe_size = sz; g_pc_exe_mtime = mt; pc_forget(); }
 }
 
-// [XCDE] T282: the runtime's answer. 0/1 are its "current" / "needs preparing"; 2 means "cannot tell" (the game files
-// cannot be read, the child did not start or did not answer). 2 does not start a precompile that would fail the same
-// way: the game then compiles the shaders as it reaches them.
-enum { PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNKNOWN };
+// [XCDE] T282: the runtime's answer. 0/1 are "current" / "needs preparing"; 2 means the game files cannot be read;
+// 3 means SPIR-V persistence is disabled, so precompilation is not applicable; anything else (including a spawn
+// failure, timeout or unexpected exit) is UNKNOWN. UNREADABLE, DISABLED and UNKNOWN never start a precompile that
+// cannot be verified; the game can still compile shaders as it reaches them.
 static int pc_status_now() {
     apply_env();  // [XCDE] T282 review: the signature covers xcde_env.ini options: ask with the same env pc_start uses
-    if (!exists(GAME_EXE)) return PC_STATUS_CURRENT;  // (no executable yet: the builder makes it; do not start a precompile that cannot run)
+    if (!exists(GAME_EXE)) return PC_STATUS_UNKNOWN;  // (no executable yet: the builder makes it; there is nothing to verify)
     std::string log = path("build/last_precompile_status.log");
 #ifdef _WIN32
     std::string exe = path(GAME_EXE);
@@ -1094,7 +1163,8 @@ static int pc_status_now() {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     if (!answered) return PC_STATUS_UNKNOWN;
-    return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : PC_STATUS_UNKNOWN;
+    return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE :
+           code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN;
 #else
     pid_t pid = spawn_logged({path(GAME_EXE), "--precompile-status", "targets"}, log, false);
     if (!pid) return PC_STATUS_UNKNOWN;  // (cannot ask it: do not start a precompile that would fail the same way)
@@ -1103,7 +1173,8 @@ static int pc_status_now() {
         if (waitpid(pid, &st, WNOHANG) == pid) {
             if (!WIFEXITED(st)) return PC_STATUS_UNKNOWN;
             int code = WEXITSTATUS(st);
-            return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : PC_STATUS_UNKNOWN;
+            return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE :
+                   code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN;
         }
         SDL_Delay(100);
     }
@@ -1112,15 +1183,39 @@ static int pc_status_now() {
     return PC_STATUS_UNKNOWN;
 #endif
 }
-static bool pc_running();  // (defined below; pc_done must not probe while the run writes the cache)
-static bool pc_done() {
+static bool pc_running();  // (defined below; a status probe must not run while the precompile writes the cache)
+static int pc_status(bool force = false) {
     pc_check_exe();
-    if (g_pc_current < 0) {
-        if (pc_running()) return false;  // [review] (the answer is known to be stale; do not spawn a second probe)
+    if (g_pc_current < 0 || (force && g_pc_current != PC_STATUS_CURRENT)) {
+        if (pc_running()) return PC_STATUS_STALE;  // (a running precompile is not prepared yet)
+        Uint64 started = SDL_GetTicks();
+        if (!force && g_pc_current == PC_STATUS_UNKNOWN &&
+            (g_pc_no_auto_retry || started < g_pc_retry_at)) return PC_STATUS_UNKNOWN;
         int status = pc_status_now();
-        g_pc_current = status == PC_STATUS_CURRENT ? 1 : status == PC_STATUS_STALE ? 0 : 1;  // (unknown: do not redo the passes)
+        Uint64 finished = SDL_GetTicks();
+        g_pc_current = status;
+        // [review] A 30 s status timeout used to leave the retry deadline in the past, so the footer started another
+        // blocking probe on the very next frame. Time the backoff from the end of the probe, and never repeat a slow one
+        // automatically: UNKNOWN stays visible and PLAY retries explicitly.
+        g_pc_no_auto_retry = status == PC_STATUS_UNKNOWN && finished - started >= PC_UNKNOWN_SLOW_MS;
+        g_pc_retry_at = status == PC_STATUS_UNKNOWN && !g_pc_no_auto_retry ? finished + PC_UNKNOWN_RETRY_MS : 0;
     }
-    return g_pc_current == 1;
+    return g_pc_current;
+}
+static bool pc_done(bool force = false) { return pc_status(force) == PC_STATUS_CURRENT; }
+// The runtime treats any presence (including a set-but-empty value) as persistence disabled. This checks the applied
+// environment directly, so the explicit button needs no full status walk and follows a Diagnostics edit immediately.
+static bool pc_persistence_disabled() {
+    std::string value;
+    return env_get_u8("LARECOMP_VK_NO_SPIRV_CACHE", value);  // (set-but-empty also disables persistence)
+}
+// A Diagnostics row is a signature input. Do not keep a verified answer from before the edit, but do not spawn a status
+// walk per keystroke either: STALE/DISABLED is the conservative answer until PLAY or Apply asks the runtime.
+static void pc_env_changed() {
+    g_pc_current = pc_persistence_disabled() ? PC_STATUS_DISABLED : PC_STATUS_STALE;
+    g_pc_retry_at = 0;
+    g_pc_no_auto_retry = false;
+    g_status.clear();  // (the footer must not keep the previous "shaders prepared" line after an input changed)
 }
 static bool pc_running() {
 #ifdef _WIN32
@@ -1129,43 +1224,45 @@ static bool pc_running() {
     return g_pc_proc != 0;
 #endif
 }
+static const char *pc_idle_text(int status) {
+    switch (status) {
+    case PC_STATUS_CURRENT: return T("Listo. Guardado: save/   Ajustes: xcde.ini");
+    case PC_STATUS_UNREADABLE: return T("No se pudieron leer los archivos del juego; se omitió la precompilación de shaders.");
+    case PC_STATUS_DISABLED: return T("La persistencia de SPIR-V está desactivada (LARECOMP_VK_NO_SPIRV_CACHE): la precompilación no se aplica y el juego compila los shaders al jugar.");
+    case PC_STATUS_UNKNOWN: return T("No se pudo verificar la caché de shaders. JUGAR reintenta; el juego puede compilarlos según los necesita.");
+    default: return T("Listo. La primera vez, JUGAR prepara los shaders antes (unos minutos)");
+    }
+}
 
 // [XCDE] T282 review: XCDE_PRECOMPILE_FORCE=1 for the explicit "Precompile shaders" child, restored as soon as it is
 // spawned. The runtime then redoes the passes even when the stamp matches and clears the crash / in-flight lists itself
 // (precompile.c); the launcher no longer deletes the done stamp before it knows the child even started, so a failed
 // spawn (antivirus lock, a missing DLL) cannot throw away a valid cache.
 struct PcForce {
-    bool on;
-#ifdef _WIN32
-    std::wstring old;
-    explicit PcForce(bool f) : on(f) {
-        if (!on) return;
-        old = env_w(L"XCDE_PRECOMPILE_FORCE");
-        SetEnvironmentVariableW(L"XCDE_PRECOMPILE_FORCE", L"1");
-    }
-    ~PcForce() {
-        if (on) SetEnvironmentVariableW(L"XCDE_PRECOMPILE_FORCE", old.empty() ? nullptr : old.c_str());
-    }
-#else
+    bool on, was_set;
     std::string old;
-    explicit PcForce(bool f) : on(f) {
+    explicit PcForce(bool f) : on(f), was_set(false) {
         if (!on) return;
-        old = env_u8("XCDE_PRECOMPILE_FORCE");  // (env_u8: the launcher never uses the CRT's getenv for settings)
-        setenv("XCDE_PRECOMPILE_FORCE", "1", 1);
+        was_set = env_get_u8("XCDE_PRECOMPILE_FORCE", old);
+        env_set_u8("XCDE_PRECOMPILE_FORCE", "1");
     }
     ~PcForce() {
         if (!on) return;
-        if (!old.empty()) setenv("XCDE_PRECOMPILE_FORCE", old.c_str(), 1);
-        else unsetenv("XCDE_PRECOMPILE_FORCE");
+        if (was_set) env_set_u8("XCDE_PRECOMPILE_FORCE", old);
+        else env_unset_u8("XCDE_PRECOMPILE_FORCE");
     }
-#endif
     PcForce(const PcForce &) = delete;
     PcForce &operator=(const PcForce &) = delete;
 };
 
-static void pc_start(bool then_play, bool fresh = false) {
+static bool pc_start(bool then_play, bool fresh = false) {
     apply_env();  // [XCDE] the Diagnostics tab variables also reach the shader precompiler
-    if (g_pc_proc) return;
+    if (pc_running()) return false;
+    if (pc_persistence_disabled()) {  // (the button is disabled too; this also guards the --shot path, without a status walk)
+        g_status = pc_idle_text(PC_STATUS_DISABLED);
+        if (then_play) g_pc_play_now = true;
+        return false;
+    }
     pc_forget();
     g_pc_t0 = SDL_GetTicks();
 #ifdef _WIN32
@@ -1188,11 +1285,18 @@ static void pc_start(bool then_play, bool fresh = false) {
     }
     std::wstring wexe = WPath(exe), wcmd = W(cmd);
     BOOL ok;
+    DWORD spawn_err = 0;
     { PcForce force(fresh);  // [review] the child gets XCDE_PRECOMPILE_FORCE=1; a failed spawn leaves the stamps alone
       ok = CreateProcessW(wexe.c_str(), wcmd.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL,
-                          WPath(g_root).c_str(), &si, &pi); }
+                          WPath(g_root).c_str(), &si, &pi);
+      spawn_err = GetLastError(); }  // (PcForce's destructor calls SetEnvironmentVariableW and may replace the error)
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    if (!ok) { g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + std::to_string(GetLastError()) + ")"; return; }
+    if (!ok) {
+        g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + std::to_string(spawn_err) + ")";
+        g_pc_then_play = then_play;
+        if (then_play) g_pc_play_now = true;  // (a failed optional preparation must not strand PLAY)
+        return false;
+    }
     CloseHandle(pi.hThread);
     g_pc_proc = pi.hProcess;
     g_pc_then_play = then_play;
@@ -1202,16 +1306,25 @@ static void pc_start(bool then_play, bool fresh = false) {
 #else
     SDL_CreateDirectory(path("cache").c_str());
     xcde_utf8_remove(path("cache/precompile_progress.txt").c_str());
-    pid_t pid;
+    pid_t pid = 0;
+    int spawn_err = 0;
     { PcForce force(fresh);  // [review] the child gets XCDE_PRECOMPILE_FORCE=1; a failed spawn leaves the stamps alone
-      pid = spawn_logged({path(GAME_EXE), "--precompile", "targets"}, path("build/last_precompile.log"), true); }
-    if (!pid) { g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + strerror(errno) + ")"; return; }
+      pid = spawn_logged({path(GAME_EXE), "--precompile", "targets"}, path("build/last_precompile.log"), true);
+      spawn_err = errno; }  // (PcForce's destructor calls setenv/unsetenv and may replace the error)
+    if (!pid) {
+        g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + strerror(spawn_err) + ")";
+        g_pc_then_play = then_play;
+        if (then_play) g_pc_play_now = true;
+        return false;
+    }
     g_pc_proc = pid;
     g_pc_then_play = then_play;
     g_pc_frac = 0;
     g_pc_text = T("Buscando shaders en los archivos del juego...");
     g_status = then_play ? T("Preparando shaders antes de la primera partida (solo esta vez)") : T("Precompilando shaders");
 #endif
+    g_pc_play_now = false;
+    return true;
 }
 
 static void pc_stop() {
@@ -1294,15 +1407,24 @@ static void pc_poll() {
     // again by itself - the new run skips what was being built (precompile.c crash-safe) - up to 3 times
     static int retries;
     pc_forget();  // [XCDE] T282: the run wrote its stamp and cache: ask the runtime again instead of the memoized answer
-    if (!(code == 0 && pc_done()) && exists("cache/precompile_inflight.bin") && retries < 3) {
+    int status = pc_status();
+    bool verified = code == 0 && status == PC_STATUS_CURRENT;
+    // Only a verified stale cache is safe to rebuild. An unreadable dump (or a status probe that could not answer) must
+    // not turn a driver retry into another doomed full pass.
+    if (!verified && status == PC_STATUS_STALE && exists("cache/precompile_inflight.bin") && retries < 3) {
         retries++;
         bool then_play = g_pc_then_play;
-        pc_start(then_play);
-        g_status = std::string(T("El controlador gráfico falló en un shader: se salta y se sigue (intento ")) + std::to_string(retries + 1) + ")";
-        return;
+        if (pc_start(then_play)) {
+            g_status = std::string(T("El controlador gráfico falló en un shader: se salta y se sigue (intento ")) + std::to_string(retries + 1) + ")";
+            return;
+        }
+        retries = 0;
+        return;  // (pc_start kept its spawn error and finalized then_play)
     }
     retries = 0;
-    g_status = code == 0 && pc_done() ? T("Shaders precompilados") : T("La precompilación falló (registro: build/last_precompile.log)");
+    if (code == 0 && (status == PC_STATUS_UNKNOWN || status == PC_STATUS_UNREADABLE || status == PC_STATUS_DISABLED))
+        g_status = pc_idle_text(status);
+    else g_status = verified ? T("Shaders precompilados") : T("La precompilación falló (registro: build/last_precompile.log)");
     if (g_pc_then_play) g_pc_play_now = true;
 }
 
@@ -2042,11 +2164,19 @@ static void tab_home() {
     ImGui::TextWrapped("%s",g.ui_lang ? "For modest hardware, start with Potato and a 30 FPS target. Quality and frame rate are independent." :
         "En equipos modestos, empieza con Patata y un objetivo de 30 FPS. La calidad y los FPS se eligen por separado.");
     ImGui::SeparatorText(g.ui_lang ? "Shader preparation" : "Preparación de shaders");
-    static uint64_t checked; static bool prepared;
-    if (!checked || SDL_GetTicks()-checked>500) { prepared=pc_done(); checked=SDL_GetTicks(); }
-    ImGui::TextWrapped("%s",prepared ? (g.ui_lang ? "Prepared for this build and these game files. New areas can still need additional variants." :
-        "Preparados para este build y estos archivos del juego. Algunas zonas aún pueden necesitar variantes adicionales.") :
-        (g.ui_lang ? "Play prepares the shader cache first. Progress can be resumed." : "Jugar prepara primero la cache de shaders. El progreso se puede retomar."));
+    int pc = pc_status();  // (memoized; UNKNOWN retries after a short backoff only when the probe was quick)
+    if (pc == PC_STATUS_CURRENT)
+        ImGui::TextWrapped("%s", g.ui_lang ? "Prepared for this build and these game files. New areas can still need additional variants." :
+            "Preparados para este build y estos archivos del juego. Algunas zonas aún pueden necesitar variantes adicionales.");
+    else if (pc == PC_STATUS_UNREADABLE)
+        ImGui::TextWrapped("%s", T("No se pudieron leer los archivos del juego; se omitió la precompilación de shaders."));
+    else if (pc == PC_STATUS_DISABLED)
+        ImGui::TextWrapped("%s", pc_idle_text(pc));
+    else if (pc == PC_STATUS_UNKNOWN)
+        ImGui::TextWrapped("%s", T("No se pudo verificar la caché de shaders. JUGAR reintenta; el juego puede compilarlos según los necesita."));
+    else
+        ImGui::TextWrapped("%s", g.ui_lang ? "Play prepares the shader cache first. Progress can be resumed." :
+            "Jugar prepara primero la cache de shaders. El progreso se puede retomar.");
     upd_section();  // GitHub #119
 }
 static void make_report();
@@ -2077,14 +2207,27 @@ static void open_or_create_folder(const char *rel) {
 #endif
 }
 
+static void clear_loose_spv_dir(const std::string &dir) {
+    // A loose SPIR-V entry is a file directly in cache/spirv. Do not recurse: a directory there is not ours to delete.
+    SDL_EnumerateDirectory(dir.c_str(), [](void *, const char *dirname, const char *fname) -> SDL_EnumerationResult {
+        if (!fname || !*fname) return SDL_ENUM_CONTINUE;
+        std::string full = std::string(dirname) + fname;
+        SDL_PathInfo pi;
+        if (SDL_GetPathInfo(full.c_str(), &pi) && pi.type == SDL_PATHTYPE_FILE) SDL_RemovePath(full.c_str());
+        return SDL_ENUM_CONTINUE;
+    }, NULL);
+    SDL_RemovePath(dir.c_str());
+}
 static void clear_shader_cache() {
     static const char *const files[] = {
         "cache/spirv.pack", "cache/spirv.idx", "cache/vk_pipelines.bin", "cache/variants.bin",
         "cache/precompile_inflight.bin", "cache/precompile_progress.txt", "cache/precompile_skip.txt",
-        "cache/precompile_sig.txt"
+        "cache/precompile_done.txt", "cache/precompile_loose_done.txt"
     };
     for (const char *f : files) SDL_RemovePath(path(f).c_str());
-    SDL_RemovePath(path("cache/spirv").c_str());
+    clear_loose_spv_dir(path("cache/spirv"));  // (loose SPIR-V mode: the individual .spv files are the cache)
+    pc_forget();  // (the cache the memoized CURRENT/STALE answer described is gone)
+    g_status.clear();  // (and the footer must not keep the old "shaders prepared" line)
 }
 
 static void tab_diagnostics() {
@@ -2099,6 +2242,7 @@ static void tab_diagnostics() {
     if (!cache_measured) { cache_bytes = dir_size_bytes(path("cache")); cache_measured = true; }
     ImGui::Text(en ? "Shader / pipeline cache size: %.1f MiB" : "Tamaño de la caché de shaders / pipelines: %.1f MiB",
                 (double)cache_bytes / (1024.0 * 1024.0));
+    ImGui::BeginDisabled(pc_running() || gc_running());
     if (ImGui::Button(en ? "Clear shader cache" : "Limpiar caché de shaders")) {
         if (confirm_clear) {
             clear_shader_cache();
@@ -2111,6 +2255,7 @@ static void tab_diagnostics() {
             confirm_at = SDL_GetTicks();
         }
     }
+    ImGui::EndDisabled();
     if (confirm_clear && SDL_GetTicks() - confirm_at > 3000) confirm_clear = false;
     if (confirm_clear) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.75f, 0.25f, 1), "%s", en ? "Click again to confirm." : "Pulsa otra vez para confirmar."); }
     else if (cache_cleared) { ImGui::SameLine(); ImGui::TextDisabled("%s", en ? "Cache cleared." : "Caché limpiada."); }
@@ -2126,6 +2271,7 @@ static void tab_diagnostics() {
     ImGui::TextWrapped(T("Se pasan al juego al iniciar. Ejemplo: XCDE_RSC_PIXEL=1 (se aplica la próxima vez que pulses JUGAR)."));
     ImGui::TextDisabled(T("Se guardan en xcde_env.ini (también puedes editarlas ahí)."));
     int focus_row = -1;  // (an existing blank row is reused instead of adding another one)
+    bool env_changed = false;
     ImGui::BeginDisabled(g.nenv >= NENV);
     if (ImGui::Button(T("Añadir variable"))) {
         for (int i = 0; i < g.nenv; i++) if (!g.env[i].name[0]) { focus_row = i; break; }
@@ -2134,6 +2280,7 @@ static void tab_diagnostics() {
             memset(&e, 0, sizeof e);
             focus_row = g.nenv - 1;
         }
+        env_changed = true;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -2151,9 +2298,11 @@ static void tab_diagnostics() {
             if (i == focus_row) ImGui::SetKeyboardFocusHere();
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputText("##name", g.env[i].name, sizeof g.env[i].name, ImGuiInputTextFlags_CharsNoBlank);
+            if (ImGui::IsItemDeactivatedAfterEdit()) env_changed = true;
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputText("##value", g.env[i].value, sizeof g.env[i].value);
+            if (ImGui::IsItemDeactivatedAfterEdit()) env_changed = true;
             ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton(T("Quitar"))) remove = i;
             ImGui::PopID();
@@ -2162,7 +2311,12 @@ static void tab_diagnostics() {
         if (remove >= 0) {
             for (int i = remove; i + 1 < g.nenv; i++) g.env[i] = g.env[i + 1];
             g.nenv--;
+            env_changed = true;
         }
+    }
+    if (env_changed) {
+        apply_env();  // (the rows are status/precompile inputs: make the edit effective before the next action)
+        pc_env_changed();
     }
     if (!g.nenv) ImGui::TextDisabled(T("No hay variables de entorno."));
     bool bad_name = false;
@@ -3097,6 +3251,19 @@ int main(int argc, char **argv) {
     bool have_exe = exists(GAME_EXE);
     bool run = true, launched = false;
     Cfg saved_cfg; memcpy(&saved_cfg,&g,sizeof g);
+    // [review] The status probe and the precompile child read xcde.ini, not the in-memory settings: a changed GPU policy
+    // must reach the file before either asks the runtime whether the cache is current, or the probe would approve (or the
+    // child warm) the previous policy and the game would start with the new one. PLAY and the explicit precompile save
+    // pending settings first; a failed save keeps the error and does not start either.
+    auto save_pending = [&]() -> bool {
+        if (g_mod_dirty || memcmp(&saved_cfg, &g, sizeof g) != 0) {
+            pc_forget();  // (the memoized answer described the old settings and/or environment)
+            if (!save()) { g_status = T("No se pudieron guardar los ajustes"); return false; }
+            memcpy(&saved_cfg, &g, sizeof g);
+            g_mod_dirty = false;
+        }
+        return true;
+    };
     static const int shot_section[] = {1, 2, 4, 5, 0, 6, 3};  // --shot tab: graphics, controls, audio, mods, home, diagnostics, cheats
     int section=shot ? (shot_tab >= 0 && shot_tab < 7 ? shot_section[shot_tab] : 0) : 0;
     uint64_t last_input=SDL_GetTicks(); bool got_event=false;
@@ -3187,6 +3354,7 @@ int main(int argc, char **argv) {
         }
         ImGui::PopItemWidth(); ImGui::EndChild();
         ImGui::Separator();
+        int frame_pc_status = pc_status();  // (the central backoff keeps a slow UNKNOWN probe from freezing every frame)
         if (!have_game) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", T("Faltan los archivos del juego en targets/ (exefs y romfs de tu copia)."));
         else if (!have_exe) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", T("Falta build/xcde.exe (compila el juego primero)."));
         else if (*g_mismatch_desc) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), g.ui_lang ?
@@ -3197,9 +3365,7 @@ int main(int argc, char **argv) {
             "Este build solo funciona con la versión que trae el paquete (build id %s). Restaura los\n"
             "targets\\exefs originales del paquete (esa misma versión del juego) y vuelve a empezar.",
             g_mismatch_desc, g_mismatch_got, g_mismatch_want);
-        else ImGui::TextDisabled(T("%s"), g_status.empty() ? (pc_done() ? T("Listo. Guardado: save/   Ajustes: xcde.ini")
-                                                                   : T("Listo. La primera vez, JUGAR prepara los shaders antes (unos minutos)"))
-                                                       : g_status.c_str());
+        else ImGui::TextDisabled(T("%s"), g_status.empty() ? pc_idle_text(frame_pc_status) : g_status.c_str());
         pc_poll();
         gc_poll();
         fp_poll();
@@ -3210,8 +3376,10 @@ int main(int argc, char **argv) {
         if (gc_running()) ImGui::ProgressBar(g_gc_frac, ImVec2(-1, 0), g_gc_text.c_str());
         if (g_gc_play_now) {
             g_gc_play_now = false;
-            if (!pc_done()) pc_start(true);
-            else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            if (save_pending()) {
+                if (pc_status(true) == PC_STATUS_STALE) pc_start(true);
+                else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            }
         }
         if (pc_running()) {
             ImGui::ProgressBar(g_pc_frac, ImVec2(-150 * scale, 0), g_pc_text.c_str());
@@ -3233,19 +3401,20 @@ int main(int argc, char **argv) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.20f, 0.30f, 1));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.96f, 0.30f, 0.38f, 1));
         if (ImGui::Button(T("JUGAR"), ImVec2(200 * scale, 0))) {
-            if (g_mod_dirty || memcmp(&saved_cfg,&g,sizeof g)!=0) pc_forget();  // [review] (the env rows are a signature input)
-            if (!gc_ready()) gc_start(true);
-            else if (!pc_done()) pc_start(true);
-            else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            if (save_pending()) {  // (the status probe and the precompile must read the settings PLAY is about to use)
+                if (!gc_ready()) gc_start(true);
+                else if (pc_status(true) == PC_STATUS_STALE) pc_start(true);
+                else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            }
         }
         ImGui::PopStyleColor(3);
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc);
+        ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc || pc_persistence_disabled());
         if (ImGui::Button(T("Precompilar shaders"))) {  // [XCDE] T281: also retries the jobs on the crash skip list
             bool retry = exists("cache/precompile_skip.txt");
-            pc_start(false, true);
-            if (retry) g_status = T("Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)");
+            if (save_pending() && pc_start(false, true) && retry)
+                g_status = T("Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)");
         }
         ImGui::SetItemTooltip("%s", g.ui_lang ? "Prepare every shader ahead of time, so new areas don't stop to compile them. Progress is kept."
                                               : "Prepara todos los shaders por adelantado, para que las zonas nuevas no se paren a compilarlos. El progreso se conserva.");

@@ -99,8 +99,47 @@ class LauncherUtf8Paths(unittest.TestCase):
         self.assertHas("GetEnvironmentVariableW", CODE, "environment read")
         self.assertHas("SetEnvironmentVariableW", CODE, "environment write")
         self.assertHas('env_w(L"PATH")', LAUNCHER, "PATH with accents")
-        # the only narrow read is the POSIX implementation of env_u8
+        # the only narrow read is the POSIX implementation of env_get_u8
         self.assertEqual(len(re.findall(r"(?<![\w.])getenv\(", CODE)), 1)
+
+    def test_environment_presence_distinguishes_unset_from_empty(self):
+        # Restoring a removed Diagnostics row must not use value.empty() as a proxy for presence.
+        self.assertHas("static bool env_get_u8(const char *name, std::string &value)", LAUNCHER,
+                       "a read that reports whether the variable existed")
+        self.assertHas("SetEnvironmentVariableW(W(name).c_str(), nullptr)", LAUNCHER,
+                       "Windows unsets through the wide API")
+        self.assertHas("SetLastError(ERROR_SUCCESS)", LAUNCHER,
+                       "an empty Win32 environment value is not a failed read")
+        self.assertHas("if (!got && GetLastError() != ERROR_SUCCESS) return false;", LAUNCHER,
+                       "only a real Win32 error means the variable disappeared")
+        self.assertHas("value = got ? U8(w.data()) : std::string();", LAUNCHER,
+                       "a successful zero-character read preserves presence")
+        self.assertHas("static void env_unset_u8(const char *name) { unsetenv(name); }", LAUNCHER,
+                       "POSIX unsets the variable")
+        self.assertHasNot("old.empty() ? nullptr", LAUNCHER, "empty is not the same as unset")
+
+    def test_removed_environment_rows_restore_the_first_original_value(self):
+        apply = LAUNCHER[LAUNCHER.index("static void apply_env() {"):LAUNCHER.index("static void load_env() {")]
+        self.assertHas("struct AppliedEnv { std::string name; bool was_set = false; std::string value; };", LAUNCHER,
+                       "presence and value are tracked together")
+        self.assertHas("original.was_set = env_get_u8(name, original.value);", apply,
+                       "capture the original before the first override")
+        self.assertHas("if (applied.was_set) env_set_u8(applied.name.c_str(), applied.value);", apply,
+                       "restore a previous value, including an empty one")
+        self.assertHas("else env_unset_u8(applied.name.c_str());", apply, "unset a variable that was originally absent")
+        self.assertHas("g_applied_env.erase", apply, "a removed name stops being tracked")
+        self.assertLess(apply.index("if (applied.was_set)"), apply.index("env_set_u8(name, g.env[i].value);"),
+                        "removed names are restored before current rows are applied")
+        self.assertHas("_stricmp(a, b)", LAUNCHER, "Windows names compare case-insensitively")
+        self.assertHas("return strcmp(a, b) == 0;", LAUNCHER, "POSIX names compare case-sensitively")
+
+    def test_temporary_force_environment_also_preserves_empty_values(self):
+        force = LAUNCHER[LAUNCHER.index("struct PcForce {"):LAUNCHER.index("static bool pc_start(")]
+        self.assertHas('was_set = env_get_u8("XCDE_PRECOMPILE_FORCE", old);', force,
+                       "remember whether FORCE was present, not merely whether it was non-empty")
+        self.assertHas('if (was_set) env_set_u8("XCDE_PRECOMPILE_FORCE", old);', force,
+                       "restore a set-but-empty FORCE")
+        self.assertHas('else env_unset_u8("XCDE_PRECOMPILE_FORCE");', force, "otherwise unset FORCE")
 
     def test_shared_file_helpers_convert_the_path(self):
         self.assertHas("xcde_utf8_replace(tmp, path)", ATOMIC_FILE, "atomic replace")

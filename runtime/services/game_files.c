@@ -56,9 +56,9 @@ static bool fail(char *why, size_t n, const char *text) {
     return false;
 }
 
-// A package is 15 GB, so offsets and sizes are 64-bit here. The Windows build has a 32-bit off_t (no
-// _FILE_OFFSET_BITS=64) and its stat size is 32-bit (_wstat64i32): reads go through ReadFile with a 64-bit
-// OVERLAPPED offset and the size through GetFileSizeEx instead.
+// A package is 15 GB, so offsets and sizes are 64-bit here. The Windows build's CRT stat size is 32-bit; folder
+// sources use xcde_utf8_file_info (GetFileInformationByHandle), and package reads use ReadFile with a 64-bit OVERLAPPED
+// offset.
 int64_t gf_pread_at(int fd, void *dst, uint64_t n, uint64_t off) {
     uint64_t done = 0;
 #ifdef _WIN32
@@ -268,9 +268,9 @@ bool gf_source(const char *path, GfSource *out) {
         *out = (GfSource){g_root, g_nodes[node].offset, g_nodes[node].size};
         return true;
     }
-    struct stat st;
-    if (xcde_utf8_stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return false;
-    *out = (GfSource){path, 0, (uint64_t)st.st_size};
+    XcdeFileInfo fi;
+    if (!xcde_utf8_file_info(path, &fi) || !fi.isreg) return false;
+    *out = (GfSource){path, 0, fi.size};
     return true;
 }
 

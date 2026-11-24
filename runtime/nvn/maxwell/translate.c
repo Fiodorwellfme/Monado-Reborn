@@ -2883,7 +2883,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     // [XCDE] XCDE_XLAT_STATS=1 (diagnostic): one line per translated program with the constructs other ports found
     // fragile (SSY/PBK stacks, BRX, BAR inside the branch state machine, FMZ multiplies, SHFL in vertex shaders), to
     // measure how many of the game's programs use them. tools: grep "[xlat-stats]" and dedupe by the code hash.
-    static int xstats = -1;
+    // [XCDE] T281: precompile workers translate concurrently without exec.c's translator lock.
+    static _Thread_local int xstats = -1;
     if (xstats < 0) xstats = getenv("XCDE_XLAT_STATS") != NULL;
     if (xstats) {
         uint64_t h = 1469598103934665603ull;
@@ -2910,7 +2911,7 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     }
     // translate
     bool dbg = maxwell_dbg_code && blob == maxwell_dbg_code && stage == STAGE_FRAGMENT;
-    static int annotate = -1;
+    static _Thread_local int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
     c->stk_tgt = any_branch ? resolve_stacks(code, end) : NULL;

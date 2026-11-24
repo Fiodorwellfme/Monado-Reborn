@@ -7,6 +7,7 @@
 #include "../../fast_sync.h"
 #include "../../kernel.h"
 #include "../../platform.h"
+#include "../../host/utf8_path.h"  // (a GLSL override must be a regular file read through the UTF-8 wrappers)
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
 #include <float.h>
@@ -2512,6 +2513,34 @@ static const char *tmaa_texel_src(uint64_t code, const char *src, char **out_pat
     return buf;
 }
 
+// A debug override is accepted only when it is a regular file and the whole file can be read: fopen() can open a
+// directory on some systems, and a failed seek/tell/short read used to become an empty shader override.
+static char *read_glsl_override(const char *dir, unsigned long long addr, const char *stage, const char *label) {
+    char path[512];
+    int len = snprintf(path, sizeof path, "%s/%llx_%s.glsl", dir, addr, stage);
+    if (len < 0 || (size_t)len >= sizeof path) return NULL;
+    XcdeFileInfo fi;
+    if (!xcde_utf8_file_info(path, &fi) || !fi.isreg) return NULL;
+    FILE *f = xcde_utf8_fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = NULL;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long n = ftell(f);
+        if (n >= 0 && (uint64_t)n == fi.size && fseek(f, 0, SEEK_SET) == 0) {
+            buf = malloc((size_t)n + 1);
+            if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n) {
+                buf[n] = 0;
+                LOG("[vk] %s shader %llx replaced from %s\n", label, addr, path);
+            } else {
+                free(buf);
+                buf = NULL;
+            }
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     size_t nv = 0, nf = 0;
@@ -2524,29 +2553,17 @@ static void compile_program(void *arg) {
     char *fs_tmaa = NULL;
     { const char *b = tmaa_texel_src(p->src[1], fs_src, &fs_tmaa); if (b) fs_src = b; }
     char *fs_over = NULL;
-    if (getenv("XCDE_GLSL_DIR")) {  // [XCDE] debugging: a hand-edited fragment shader (<dir>/<code addr>_fs.glsl) replaces the translated one
-        char path[512];
-        snprintf(path, sizeof path, "%s/%llx_fs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[1]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-            fs_over = malloc((size_t)n + 1);
-            if (fs_over && fread(fs_over, 1, (size_t)n, f) == (size_t)n) { fs_over[n] = 0; fs_src = fs_over; LOG("[vk] fragment shader %llx replaced from %s\n", (unsigned long long)p->code[1], path); }
-            fclose(f);
-        }
+    char glsl_dir_env[1100];
+    const char *glsl_dir = xcde_utf8_getenv("XCDE_GLSL_DIR", glsl_dir_env, sizeof glsl_dir_env) ? glsl_dir_env : NULL;
+    if (glsl_dir && *glsl_dir) {  // [XCDE] debugging: a hand-edited fragment shader (<dir>/<code addr>_fs.glsl) replaces the translated one
+        fs_over = read_glsl_override(glsl_dir, (unsigned long long)p->code[1], "fs", "fragment");
+        if (fs_over) fs_src = fs_over;
     }
     const char *vs_src = p->vi->msl;
     char *vs_over = NULL;
-    if (getenv("XCDE_GLSL_DIR")) {  // [XCDE] the same for vertex shaders (<dir>/<code addr>_vs.glsl)
-        char path[512];
-        snprintf(path, sizeof path, "%s/%llx_vs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[0]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-            vs_over = malloc((size_t)n + 1);
-            if (vs_over && fread(vs_over, 1, (size_t)n, f) == (size_t)n) { vs_over[n] = 0; vs_src = vs_over; LOG("[vk] vertex shader %llx replaced from %s\n", (unsigned long long)p->code[0], path); }
-            fclose(f);
-        }
+    if (glsl_dir && *glsl_dir) {  // [XCDE] the same for vertex shaders (<dir>/<code addr>_vs.glsl)
+        vs_over = read_glsl_override(glsl_dir, (unsigned long long)p->code[0], "vs", "vertex");
+        if (vs_over) vs_src = vs_over;
     }
     unsigned miss0 = vk_spirv_tl_misses;
     uint32_t *sv = vk_glsl_to_spirv(vs_src, STAGE_VERTEX, "vs", &nv);
@@ -2592,7 +2609,8 @@ static void translate_program(void *arg) {
     p->t_x0 = SDL_GetTicksNS();
     xlat_lock();
     p->t_xl = SDL_GetTicksNS();
-    static int trace_tr = -1;  // [XCDE] XCDE_TRACE_TRANSLATE=1: start / end of every translation (finds a translation that never ends)
+    // [XCDE] XCDE_TRACE_TRANSLATE=1: start / end of every translation (finds a translation that never ends).
+    static _Thread_local int trace_tr = -1;  // [XCDE] T281: precompile workers bypass xlat_lock
     if (trace_tr < 0) trace_tr = getenv("XCDE_TRACE_TRANSLATE") != NULL;
     if (trace_tr) LOG("[xlat] begin vs=%llx fs=%llx""%c", (unsigned long long)p->code[0], (unsigned long long)p->code[1], 10);
     p->vi = maxwell_translate((const uint8_t *)(uintptr_t)p->src[0], p->cmax[0], STAGE_VERTEX, &p->vkey);
@@ -3849,6 +3867,39 @@ typedef struct {
     ShaderKey vkey, fkey;
     PipeKey k;  // (k.prog is NULL in the file)
 } Variant;
+// [review] A variant file is cache input, not a trusted program. Validate the fields that index fixed arrays before
+// the record can reach pipeline_whole(): ncolor is written into cba[8] and read from write_mask[8], and the shader
+// keys index translator state. The game's prewarm reads the same records, so this protects both paths.
+static bool variant_valid(const Variant *v) {
+    const PipeKey *k = &v->k;
+    if (v->has_gs > 1 || v->gs_in > 3) return false;
+    if (k->ncolor > 8 || k->a2c > 1 || k->poly_fill > 1 || k->topo_class > 2 || k->logic_op > 16) return false;
+    switch (k->samples) {
+    case 1: case 2: case 4: case 8: case 16: case 32: case 64: break;
+    default: return false;
+    }
+    if (k->used_streams & ~((1u << 17) - 1)) return false;
+    for (uint32_t i = 0; i < 32; i++)
+        if ((k->attr_mask & (1u << i)) && k->attr_bind[i] >= 17) return false;
+    for (int i = 0; i < 32; i++) if (v->vkey.attr_kind[i] > 2) return false;
+    for (int i = 0; i < 8; i++) if (v->fkey.rt_kind[i] > 2) return false;
+    if (v->vkey.xfb_n > 16 || v->fkey.xfb_n > 16) return false;
+    for (int i = 0; i < 16; i++)
+        if (v->vkey.xfb_comps[i] > 4 || v->fkey.xfb_comps[i] > 4) return false;
+    if (v->vkey.alpha_func > 8 || v->fkey.alpha_func > 8) return false;
+    if (v->vkey.gs_in > 3 || v->fkey.gs_in > 3) return false;
+    if (v->vkey.glsl > 1 || v->fkey.glsl > 1) return false;
+    return true;
+}
+// The on-disk record ABI shared with the offline precompiler. It validates variant files before making any jobs, so a
+// record written by an incompatible build is skipped instead of becoming a pipeline failure on every run.
+size_t vk_precompile_variant_size(void) { return sizeof(Variant); }
+bool vk_precompile_variant_valid(const void *rec, size_t rec_size) {
+    if (!rec || rec_size != sizeof(Variant)) return false;
+    Variant v;
+    memcpy(&v, rec, sizeof v);
+    return variant_valid(&v);
+}
 static Variant *var_db;
 static size_t var_n, var_cap;
 static uint64_t var_set[1 << 18];  // hashes of the recorded variants (open addressing; [XCDE] T240: room for the whole game's tours)
@@ -3907,7 +3958,7 @@ static void var_load(void) {
             ok = true;
             Variant v;
             while (fread(&v, sizeof v, 1, f) == 1)
-                if (!var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
+                if (variant_valid(&v) && !var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
         }
         fclose(f);
         LOG("[prewarm] %zu shader variants known (cache/variants.bin)\n", var_n);
@@ -3920,7 +3971,7 @@ static void var_load(void) {
         if (sf && fread(hdr, 4, 2, sf) == 2 && hdr[0] == 0x56435843u && hdr[1] == (uint32_t)sizeof(Variant)) {
             Variant v;
             while (fread(&v, sizeof v, 1, sf) == 1)
-                if (!var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
+                if (variant_valid(&v) && !var_seen(hash_words(0xcbf29ce484222325ull, &v, sizeof v))) var_add(&v);
             if (!ok && var_n > n0) ok = true;  // (then written into the player's own file below)
         }
         if (sf) fclose(sf);
@@ -4255,7 +4306,7 @@ int vk_precompile_program(const NvnProgram *np, const ShaderKey *vkey, const Sha
 // cache (g_vk.pcache null): the driver's own disk cache keeps the result, so the game's optimized build of that
 // pipeline - the one that replaces its fast link a few frames after the first draw - is a cache hit. Returns 1 if built.
 int vk_precompile_variant(const NvnProgram *np, const void *rec, size_t rec_size) {
-    if (rec_size != sizeof(Variant)) return 0;
+    if (!vk_precompile_variant_valid(rec, rec_size)) return 0;  // (a corrupt cache record must not reach pipeline_whole)
     Variant v;
     memcpy(&v, rec, sizeof v);
     if (v.has_gs) return 0;

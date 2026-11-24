@@ -115,11 +115,13 @@ class BuilderProgressLines(unittest.TestCase):
 
 # A stand-in game for `--precompile <dump>`: writes the progress file twice and the done stamp, as precompile.c does.
 # T281 format: <phase> <overall done> <overall total> <this pass done> <this pass total>.
-GAME_PRECOMPILES = ('#!/bin/sh\n[ "$1" = --precompile ] || exit 9\n'
+GAME_PRECOMPILES = ('#!/bin/sh\n[ "$1" = --precompile-status ] && exit 1\n'
+                    '[ "$1" = --precompile ] || exit 9\n'
                     'echo "scan 300 1000 5 10" > cache/precompile_progress.txt\nsleep 1\n'
                     'echo "pipelines 900 1000 3 3" > cache/precompile_progress.txt\nsleep 1\n'
                     'echo "programs 3 built 3" > cache/precompile_done.txt\n')
-GAME_FAILS = '#!/bin/sh\nexit 3\n'
+GAME_PERSISTENCE_DISABLED = '#!/bin/sh\nexit 3\n'
+GAME_PRECOMPILE_FAILS = '#!/bin/sh\n[ "$1" = --precompile-status ] && exit 1\nexit 3\n'
 
 
 class ShaderPrecompile(unittest.TestCase):
@@ -144,12 +146,15 @@ class ShaderPrecompile(unittest.TestCase):
         return ('#!/bin/sh\n[ "$1" = --precompile-status ] && [ "$2" = "' + str(self.root / 'dump') + '" ] && exit 0\n'
                 'exit 1\n')
 
-    def run_precompile(self, exe):
+    def run_precompile_output(self, exe):
         env = {'RECOMPLAUNCHER': '1', 'MONADO_DATA_ROOT': str(self.root), 'MONADO_GAME_EXE': str(exe or '')}
         printed = io.StringIO()
         with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stdout(printed):
             gb.precompile_shaders(self.root / 'dump')
-        return [line for line in printed.getvalue().splitlines() if line.startswith('progress ')]
+        return printed.getvalue()
+
+    def run_precompile(self, exe):
+        return [line for line in self.run_precompile_output(exe).splitlines() if line.startswith('progress ')]
 
     def test_scan_line_is_the_first_part_of_the_shaders(self):
         share, text = gb.precompile_step('scan 300 1000 5 10')
@@ -177,7 +182,10 @@ class ShaderPrecompile(unittest.TestCase):
     def test_precompile_status_decides_whether_a_run_happens(self):
         # T282: the builder asks the runtime (`--precompile-status <dump>`), not the old `exe <size> <mtime>` stamp.
         self.assertTrue(gb.precompile_is_current(self.root, self.game(self.status_current()), self.root / 'dump'))
-        self.assertFalse(gb.precompile_is_current(self.root, self.game(GAME_FAILS), self.root / 'dump'))
+        self.assertFalse(gb.precompile_is_current(self.root, self.game(GAME_PERSISTENCE_DISABLED), self.root / 'dump'))
+        # Exit 3 is a known non-applicable mode, not a failed probe or a current cache.
+        self.assertEqual(gb.precompile_status(self.root, self.game(GAME_PERSISTENCE_DISABLED), self.root / 'dump'), gb.PC_STATUS_DISABLED)
+        self.assertFalse(gb.precompile_is_current(self.root, self.game(GAME_PERSISTENCE_DISABLED), self.root / 'dump'))
 
     @unittest.skipUnless(os.name == 'posix', 'the stand-in game is a shell script')
     def test_a_current_precompile_is_not_started(self):
@@ -185,17 +193,35 @@ class ShaderPrecompile(unittest.TestCase):
         self.assertEqual(lines, ['progress 1.0000 Shaders already prepared'])
         self.assertFalse((self.root / 'cache/precompile_progress.txt').exists())
 
+    def test_disabled_spirv_persistence_skips_the_full_precompile(self):
+        # Exit 3 is not a stale cache: a full run would only exit 0 without preparing or writing a stamp.
+        exe = self.game('')
+        with mock.patch.object(gb, 'precompile_status', return_value=gb.PC_STATUS_DISABLED), \
+                mock.patch.object(gb.subprocess, 'Popen') as popen:
+            output = self.run_precompile_output(exe)
+        popen.assert_not_called()
+        self.assertIn('SPIR-V persistence is disabled', output)
+        self.assertIn('LARECOMP_VK_NO_SPIRV_CACHE', output)
+        self.assertIn('the shader precompile was skipped', output)
+        self.assertIn('does not apply', output)
+        self.assertIn('the game compiles shaders as it reaches them', output)
+        self.assertIn('progress 1.0000 Shaders compile while you play', output)
+        self.assertFalse((self.root / 'cache/precompile_progress.txt').exists())
+        self.assertFalse((self.root / 'cache/precompile_done.txt').exists())
+
     def test_a_missing_game_executable_is_not_current(self):
         self.assertFalse(gb.precompile_is_current(self.root, self.root / 'no-such-game', self.root / 'dump'))
 
     @unittest.skipUnless(os.name == 'posix', 'the stand-in game is a shell script')
     def test_the_runtime_exit_codes_are_preserved(self):
-        # [XCDE] T282 review: 0 current, 1 stale, 2 unreadable; anything else / a timeout / an OSError is "cannot ask".
+        # [XCDE] T282 review: 0 current, 1 stale, 2 unreadable, 3 persistence disabled; anything else / a timeout / an
+        # OSError is "cannot ask".
         def status_with(code):
             return self.game('#!/bin/sh\n[ "$1" = --precompile-status ] && exit ' + str(code) + '\nexit 9\n')
         self.assertEqual(gb.precompile_status(self.root, status_with(0), self.root / 'dump'), gb.PC_STATUS_CURRENT)
         self.assertEqual(gb.precompile_status(self.root, status_with(1), self.root / 'dump'), gb.PC_STATUS_STALE)
         self.assertEqual(gb.precompile_status(self.root, status_with(2), self.root / 'dump'), gb.PC_STATUS_UNREADABLE)
+        self.assertEqual(gb.precompile_status(self.root, status_with(3), self.root / 'dump'), gb.PC_STATUS_DISABLED)
         self.assertEqual(gb.precompile_status(self.root, status_with(7), self.root / 'dump'), -1)
         self.assertEqual(gb.precompile_status(self.root, self.root / 'no-such-game', self.root / 'dump'), -1)
 
@@ -212,6 +238,28 @@ class ShaderPrecompile(unittest.TestCase):
         lines = self.run_precompile(exe)
         self.assertEqual(lines, ['progress 1.0000 Shaders compile while you play'])
         self.assertFalse((self.root / 'cache/precompile_progress.txt').exists())
+
+    def test_an_unverifiable_status_skips_the_full_precompile(self):
+        # A timeout, spawn failure or unexpected status exit is not a stale cache: do not launch an unbounded full pass.
+        exe = self.game('')
+        with mock.patch.object(gb, 'precompile_status', return_value=-1), \
+                mock.patch.object(gb.subprocess, 'Popen') as popen:
+            output = self.run_precompile_output(exe)
+        popen.assert_not_called()
+        self.assertIn('could not verify the shader cache', output)
+        self.assertIn('the shader precompile was skipped', output)
+        self.assertIn('progress 1.0000 Shaders compile while you play', output)
+        self.assertFalse((self.root / 'cache/precompile_progress.txt').exists())
+
+    def test_a_full_precompile_spawn_error_is_non_fatal(self):
+        exe = self.game('')
+        with mock.patch.object(gb, 'precompile_status', return_value=gb.PC_STATUS_STALE), \
+                mock.patch.object(gb.subprocess, 'Popen', side_effect=OSError('blocked by security policy')):
+            output = self.run_precompile_output(exe)
+        self.assertIn('could not start the shader precompile', output)
+        self.assertIn('blocked by security policy', output)
+        self.assertIn('the game compiles shaders as it reaches them', output)
+        self.assertIn('progress 1.0000 Shaders compile while you play', output)
 
     def test_frozen_builders_library_path_is_given_back(self):
         env = {'LD_LIBRARY_PATH': '/frozen/_internal', 'LD_LIBRARY_PATH_ORIG': '/app/usr/lib'}
@@ -233,7 +281,7 @@ class ShaderPrecompile(unittest.TestCase):
 
     @unittest.skipUnless(os.name == 'posix', 'the stand-in game is a shell script')
     def test_a_failed_precompile_still_finishes_the_setup(self):
-        lines = self.run_precompile(self.game(GAME_FAILS))
+        lines = self.run_precompile(self.game(GAME_PRECOMPILE_FAILS))
         self.assertEqual(lines[-1], 'progress 1.0000 Shaders compile while you play')
 
     def test_precompile_switch_is_accepted(self):
@@ -271,15 +319,121 @@ class SourceContracts(unittest.TestCase):
         stop = launcher[launcher.index('static void pc_stop()'):launcher.index('static void pc_poll()')]
         self.assertIn('precompile_inflight.bin', stop)
         self.assertIn('xcde_utf8_remove', stop)
-        start = launcher[launcher.index('static void pc_start(bool then_play, bool fresh = false)'):
+        start = launcher[launcher.index('static bool pc_start(bool then_play, bool fresh = false)'):
                          launcher.index('static void pc_stop()')]
         self.assertIn('PcForce force(fresh)', start)
         self.assertNotIn('precompile_done.txt', start)
         self.assertIn('pc_start(false, true)', launcher)
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')
-        forced = precompile[precompile.index('if (forced) {'):precompile.index('t_run = t0;')]
+        forced_start = precompile.index('if (forced) {', precompile.index('int vk_precompile_main('))
+        forced = precompile[forced_start:precompile.index('inflight_open();', forced_start)]
         self.assertIn('precompile_skip.txt', forced)
         self.assertIn('precompile_inflight.bin', forced)
+
+    def test_unknown_precompile_status_is_distinct_and_backed_off(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        state = launcher[launcher.index('enum { PC_STATUS_CURRENT'):
+                         launcher.index('struct PcForce {')]
+        self.assertIn('PC_STATUS_UNREADABLE, PC_STATUS_DISABLED, PC_STATUS_UNKNOWN', state)
+        self.assertIn('PC_UNKNOWN_RETRY_MS = 5000', state)
+        self.assertIn('PC_UNKNOWN_SLOW_MS = 1000', state)
+        self.assertIn('g_pc_current = status;', state)
+        self.assertNotIn('status == PC_STATUS_CURRENT ? 1', state)  # (UNKNOWN must never become CURRENT)
+        self.assertIn('force && g_pc_current != PC_STATUS_CURRENT', state)
+        # [review] the deadline is measured after the probe, and a slow probe is never retried by the footer.
+        self.assertIn('Uint64 started = SDL_GetTicks();', state)
+        self.assertIn('Uint64 finished = SDL_GetTicks();', state)
+        self.assertIn('finished - started >= PC_UNKNOWN_SLOW_MS', state)
+        self.assertIn('g_pc_no_auto_retry || started < g_pc_retry_at', state)
+        self.assertIn('g_pc_retry_at = status == PC_STATUS_UNKNOWN && !g_pc_no_auto_retry ? finished + PC_UNKNOWN_RETRY_MS : 0;', state)
+        self.assertIn('return pc_status(force) == PC_STATUS_CURRENT;', state)
+        probe = launcher[launcher.index('static int pc_status_now() {'):launcher.index('static bool pc_running();')]
+        self.assertIn('code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN', probe)
+        self.assertEqual(probe.count('code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN'), 2)  # (Windows and POSIX)
+        self.assertIn('if (!exists(GAME_EXE)) return PC_STATUS_UNKNOWN;', probe)
+
+    def test_clearing_the_cache_drops_the_stamps_and_the_memoized_status(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        clear = launcher[launcher.index('static void clear_shader_cache() {'):
+                         launcher.index('static void tab_diagnostics()', launcher.index('static void clear_shader_cache() {'))]
+        self.assertIn('cache/precompile_done.txt', clear)
+        self.assertIn('cache/precompile_loose_done.txt', clear)
+        self.assertNotIn('cache/precompile_sig.txt', clear)  # (that was never written)
+        self.assertIn('clear_loose_spv_dir(path("cache/spirv"))', clear)  # (loose mode: the .spv files are the cache)
+        self.assertIn('pc_forget();', clear)  # (otherwise the next frame keeps reporting CURRENT)
+        self.assertIn('g_status.clear();', clear)  # (the footer's old "shaders prepared" line is not still true)
+
+    def test_an_environment_edit_clears_the_old_status_line(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        changed = launcher[launcher.index('static void pc_env_changed() {'):launcher.index('static bool pc_running() {')]
+        self.assertIn('g_pc_current = pc_persistence_disabled() ? PC_STATUS_DISABLED : PC_STATUS_STALE;', changed)
+        self.assertIn('g_status.clear();', changed)
+
+    def test_the_cache_clear_button_is_disabled_during_a_run(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        diagnostics = launcher[launcher.index('static void tab_diagnostics() {'):
+                               launcher.index('static void make_report() {')]
+        clear = diagnostics[diagnostics.index('ImGui::BeginDisabled(pc_running() || gc_running());'):
+                            diagnostics.index('ImGui::EndDisabled();', diagnostics.index('ImGui::BeginDisabled(pc_running() || gc_running());'))]
+        self.assertIn('Clear shader cache', clear)
+        self.assertIn('clear_shader_cache();', clear)
+
+    def test_home_and_footer_report_unverified_shaders_honestly(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        home = launcher[launcher.index('static void tab_home() {'):launcher.index('static void make_report();')]
+        self.assertIn('int pc = pc_status();', home)
+        self.assertIn('pc == PC_STATUS_UNKNOWN', home)
+        self.assertIn('pc == PC_STATUS_UNREADABLE', home)
+        self.assertIn('pc == PC_STATUS_DISABLED', home)
+        self.assertIn('ImGui::TextWrapped("%s", pc_idle_text(pc));', home)
+        self.assertIn('La persistencia de SPIR-V está desactivada', launcher)
+        self.assertIn('SPIR-V persistence is disabled', launcher)
+        self.assertIn('case PC_STATUS_DISABLED: return T(', launcher)  # (the footer's idle text too)
+        self.assertIn('No se pudo verificar la caché de shaders', home)
+        self.assertIn('Could not verify the shader cache', launcher)
+        self.assertNotIn('SDL_GetTicks()-checked>500', home)  # (the backoff belongs in pc_status, not a second poller)
+        self.assertIn('int frame_pc_status = pc_status();', launcher)
+        self.assertIn('pc_idle_text(frame_pc_status)', launcher)
+
+    def test_play_retries_status_but_only_precompiles_a_verified_stale_cache(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        play = launcher[launcher.index('if (ImGui::Button(T("JUGAR")'):
+                     launcher.index('ImGui::PopStyleColor(3);', launcher.index('if (ImGui::Button(T("JUGAR")'))]
+        self.assertIn('pc_status(true) == PC_STATUS_STALE', play)
+        self.assertEqual(launcher.count('pc_status(true) == PC_STATUS_STALE'), 2)  # (PLAY and post-game-build PLAY)
+        self.assertNotIn('!pc_done()', play)
+        poll = launcher[launcher.index('static void pc_poll() {'):launcher.index('// ------------------------------------------------------------------ game code')]
+        self.assertIn('status == PC_STATUS_STALE && exists("cache/precompile_inflight.bin")', poll)
+        self.assertIn('status == PC_STATUS_DISABLED', poll)
+        self.assertIn('if (code == 0 && (status == PC_STATUS_UNKNOWN || status == PC_STATUS_UNREADABLE || '
+                      'status == PC_STATUS_DISABLED))', poll)
+
+    def test_pc_start_reports_failure_without_overwriting_its_error(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        start = launcher[launcher.index('static bool pc_start(bool then_play, bool fresh = false)'):
+                         launcher.index('static void pc_stop()')]
+        self.assertIn('DWORD spawn_err = 0;', start)
+        self.assertIn('int spawn_err = 0;', start)
+        self.assertIn('spawn_err = GetLastError(); }', start)  # (inside the PcForce scope, before its destructor)
+        self.assertIn('spawn_err = errno; }', start)
+        self.assertLess(start.index('ok = CreateProcessW'), start.index('spawn_err = GetLastError();'))
+        self.assertLess(start.index('spawn_err = GetLastError();'),
+                        start.index('if (h != INVALID_HANDLE_VALUE) CloseHandle(h);'))
+        self.assertLess(start.index('pid = spawn_logged'), start.index('spawn_err = errno;'))
+        self.assertLess(start.index('spawn_err = errno;'), start.index('if (!pid)'))
+        self.assertIn('if (then_play) g_pc_play_now = true;', start)
+        self.assertIn('return false;', start)
+        self.assertIn('return true;', start)
+        self.assertIn('if (pc_persistence_disabled())', start)  # (the --shot path must not run a no-stamp pass)
+        self.assertIn('g_status = pc_idle_text(PC_STATUS_DISABLED);', start)
+        self.assertNotIn('pc_status()', start)  # a manual run must not block on a full status walk
+        self.assertIn('if (save_pending() && pc_start(false, true) && retry)', launcher)
+        self.assertIn('if (pc_start(then_play))', launcher)
+        self.assertIn('pc_persistence_disabled()', launcher)  # (the explicit button uses the applied environment)
+        diagnostics = launcher[launcher.index('static void tab_diagnostics() {'):
+                               launcher.index('static void make_report() {')]
+        self.assertIn('ImGui::IsItemDeactivatedAfterEdit()', diagnostics)
+        self.assertIn('pc_env_changed();', diagnostics)  # (a row edit invalidates the memo without a status walk)
 
     def test_the_shader_precompile_bar_covers_the_four_passes(self):
         # T281: the progress file is "<phase> <overall done> <overall total> <this pass done> <this pass total>" over

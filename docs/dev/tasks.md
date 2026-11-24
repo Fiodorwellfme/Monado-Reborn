@@ -1869,3 +1869,15 @@ Detalle: `docs/PERFORMANCE_UI.md`. Evidencia: `docs/evidence/2026-11-04-performa
   remaining function statics are thread-local and `g_wide_box_possible` is atomic, the translator folder is hashed
   recursively, a selective `scripts/build_rt_gfx.sh` build always refreshes the fingerprint unit, and `validate_port.py`
   builds `test_precompile_sig` once and warning-strict. Unit suite: 220 (10 skipped).
+- [x] T282 review follow-up (post-merge): use 64-bit Windows cache sizes; make the remaining translator lazy caches
+  thread-local and test concurrent first use; stamp only complete scans/builds; RAM-bound source and decompression buffers
+  and check thread startup; validate/invalidate before forced cleanup; track loose-cache completion; fingerprint the game-file
+  reader and bloom/GTAO GLSL headers plus their environment switches; keep UNKNOWN launcher status distinct and restore
+  removed Diagnostics environment rows.
+- [x] T282 PR #247 review follow-up: keep required failures fatal but guessed/seed/pipeline work best-effort; validate
+  variant record size; return a distinct persistence-disabled status; separate large-file scan slots; fail incomplete
+  directory walks; use shared 64-bit Windows metadata for game files and caches with a sparse 3 GiB native test; hash
+  `XCDE_GLSL_DIR` override bytes.
+- [x] T282 PR #247 final review: PLAY/precompile save pending settings before the runtime reads `xcde.ini`; clearing the
+  cache removes loose `.spv` files and stale footer text and is disabled during a run; `XCDE_GLSL_DIR` is read as UTF-8
+  and a file path there is treated as no override directory.

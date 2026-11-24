@@ -456,3 +456,71 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
   users on 8 threads and compares every GLSL source with the serial output (Linux native suite and Windows
   validate_port); unit tests updated for the force/memo/exit-code contracts and the new fingerprint inputs.
   `scripts/ci.sh`: 220 unit tests (10 skipped); native suite and a runtime-only CMake build of the changed units pass.
+
+## 2026-11-24 — post-merge PR #231 review fixes
+
+- Windows cache validation now uses a 64-bit file-size query, so a valid `cache/spirv.pack` larger than 2 GiB does not force a
+  full precompile after every build.
+- The translator's remaining lazy diagnostics caches are thread-local. The parallel translation test now holds workers at a
+  start gate, compares their concurrent first translations with a serial baseline generated only after they join, and checks
+  thread-creation failures.
+- A precompile writes a current signature only after the scan and all build passes complete without unexpected failures.
+  Source reads and xbc1 decompression share RAM-bounded admission budgets; scanner count is RAM-aware and every worker phase
+  joins only threads that started.
+- A forced rerun validates the root and invalidates the old stamp before deleting crash-retry records, and performs that
+  deletion only after Vulkan initialization succeeds. Loose-SPIR-V mode has its own completion marker; a persistence-disabled
+  run cannot stamp the cache current.
+- The build fingerprint now includes the game-file reader and the GLSL replacement headers (bloom and GTAO). The runtime
+  signature includes the corresponding replacement/patch switches, GPL/layout policy and SPIR-V cache-mode options; the
+  artifacts revision was bumped for the GTAO change already on main.
+- The launcher no longer reports an unknown status probe as prepared, retries verification explicitly, and restores/unsets
+  Diagnostics environment rows when they are removed. RecompLauncher's builder skips the unbounded full run after a failed
+  status probe and treats a full-run spawn failure as non-fatal.
+- Validation: 242 unit tests (10 skipped), the Linux native suite, focused Clang/GCC signature tests, a cold-start translator
+  TSAN run, targeted Clang compilation of `precompile.c`, and ASan/UBSan cache-mode/scanner harnesses (including a sparse
+  3 GiB pack) pass. The Windows branch was source-reviewed but not executed locally.
+
+## 2026-11-24 — PR #247 review follow-up
+
+- Only required scan/base-program failures block a current stamp. Extra/named guesses, seed records and whole pipelines
+  remain best-effort; their failures are reported without forcing a full rerun on every launch. `n_built` counts base
+  programs again, and incompatible variant-record sizes are skipped before creating jobs.
+- `--precompile-status` returns 3 when SPIR-V persistence is disabled. The launcher and RecompLauncher builder show that
+  precompilation does not apply and skip the repeated full pass; the explicit Precompile button is disabled and
+  `pc_start` refuses to spawn the same no-stamp run.
+- The scan budget has a separate large-file slot counter, so small files no longer delay a `>64 MiB` container. Unreadable
+  shader containers and directories make the signature/scan incomplete instead of being silently skipped. Only entries
+  proven irrelevant are skipped (a known non-directory type and `ENOENT`/`ENOTDIR`, e.g. a dangling mod file); `EACCES`,
+  other errors and `DT_UNKNOWN` stay fatal so an inaccessible subtree cannot be missed.
+- A shared `xcde_utf8_file_info()` helper gives the game-file reader, signature walk, precompile listing and cache validator
+  64-bit metadata on Windows. The native UTF-8 path test now creates a sparse 3 GiB file and verifies its reported size.
+- `XCDE_GLSL_DIR` hashes the override `.glsl` bytes as well as the directory path, so in-place debug-shader edits invalidate
+  the precompile signature. exec.c now accepts an override only when it is a regular file and seek/tell/read succeed (a
+  directory can be `fopen`ed on Linux and used to look like an empty shader); non-regular or unreadable entries are
+  skipped with a warning, and regular files of any size are hashed.
+- POSIX `xcde_opendir` now checks `readdir`'s error state, so a partial directory listing cannot make the signature or the
+  precompile scan look complete. The signature walk and precompile listing share one path limit.
+- Diagnostics environment edits invalidate the memoized precompile status. The explicit Precompile button checks the
+  applied environment directly for `LARECOMP_VK_NO_SPIRV_CACHE`, so it needs no synchronous status walk and re-enables as
+  soon as the variable is removed.
+- A precompile run that finds no shader files but recorded scan failures (a missing/corrupt package `romfs`, for example)
+  now exits 2 as unreadable instead of 1 as stale, so the launcher and builder do not retry a doomed run.
+- Variant records are validated before they can become jobs and again as the last line of defence: `ncolor` is limited to
+  the eight fixed colour slots, and sample counts, attribute bindings/streams, topology, logic-op and the shader-key
+  fields are range-checked. A correctly sized but corrupt `cache/variants.bin` or seed can no longer reach
+  `pipeline_whole()`'s `cba[8]`/`write_mask[8]`; the game's own prewarm uses the same validator.
+- The effective `xcde.ini` GPU pipeline policy (`gpu_profile` compatibility, `gpu_gpl` on/off) is loaded before
+  `LARECOMP_HIDDEN` makes `settings_load()` ignore the file, and is part of the cache signature. The precompile now warms
+  the same libraries/whole pipelines the game will ask for, and changing the policy invalidates the cache. PLAY and the
+  explicit precompile save pending settings before the status probe/child starts: the probe and the child read
+  `xcde.ini`, so without the save they could approve (or warm) the previous policy while the game starts with the new one.
+- Diagnostics environment edits and "Clear shader cache" also drop the footer's previous status line. The clear button
+  is disabled while a precompile or game-code build is running, so it cannot delete cache files underneath it, and it
+  removes the loose `cache/spirv/*.spv` files too (previously the non-empty directory was left in place).
+- A status probe that takes a second or more is no longer retried automatically from the launcher's render path; the
+  retry deadline is measured after the probe, and only PLAY or another explicit action retries a slow UNKNOWN.
+- "Clear shader cache" removes `cache/precompile_done.txt` and `cache/precompile_loose_done.txt` (the old code removed the
+  never-written `cache/precompile_sig.txt`) and drops the memoized status, so the next frame cannot keep reporting CURRENT.
+- Validation: 258 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
+  targeted Clang syntax checks for `precompile.c`/`exec.c`, and the Linux launcher syntax check pass. Windows execution is
+  still pending; the sparse-file test is included in the Windows validation suite.
