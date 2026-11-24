@@ -46,10 +46,14 @@ static inline void ui_scale_hud_anchor(const float b[4], float w, float h, float
     *iny = *ay != 0 && *ay != h && *ay != h * 0.5f;
 }
 
-// box: the element in guest pixels (x0, y0, x1, y1; y down) on a w x h frame. false: leave the draw alone (it
-// covers the frame: a full-screen tint, fade or vignette must keep covering it)
+// box: the element in guest pixels (x0, y0, x1, y1; y down) on a w x h frame.
+// true when the box covers the whole frame (a full-screen tint, fade or vignette).
+static inline bool ui_scale_is_full_frame(const float box[4], float w, float h) {
+    return box[2] - box[0] >= 0.9f * w && box[3] - box[1] >= 0.9f * h;
+}
+// false: leave the draw alone (it covers the frame: a full-screen tint, fade or vignette must keep covering it)
 static inline bool ui_scale_anchor(const float box[4], float w, float h, float *ax, float *ay) {
-    if (box[2] - box[0] >= 0.9f * w && box[3] - box[1] >= 0.9f * h) return false;
+    if (ui_scale_is_full_frame(box, w, h)) return false;
     bool inx, iny;
     ui_scale_hud_anchor(box, w, h, ax, ay, &inx, &iny);
     return true;
@@ -100,7 +104,7 @@ typedef struct {
 } UiScaleGroup;
 
 static inline bool ui_scale_group_anchor(UiScaleGroup *g, const float box[4], float w, float h, float *ax, float *ay) {
-    if (box[2] - box[0] >= 0.9f * w && box[3] - box[1] >= 0.9f * h) return false;  // (full frame: not scaled, no group)
+    if (ui_scale_is_full_frame(box, w, h)) return false;  // (full frame: not scaled, no group)
     // (32 px of the 1280x720 frame between pieces in the edge band, else 12: as ui_scale_frame_begin)
     bool band = ui_scale_in_band_(box, w, h) && g->valid && ui_scale_in_band_(g->box, w, h);
     float m = band ? h * 0.045f : h * 0.017f;
@@ -265,7 +269,7 @@ static inline void ui_scale_frame_begin(UiScaleFrame *f, float w, float h) {
 
 // this draw's anchor; false: not scaled (away from the frame's edges, a marker, a window, or it covers the frame)
 static inline bool ui_scale_frame_anchor(UiScaleFrame *f, const float box[4], float w, float h, float *ax, float *ay) {
-    if (box[2] - box[0] >= 0.9f * w && box[3] - box[1] >= 0.9f * h) return false;
+    if (ui_scale_is_full_frame(box, w, h)) return false;
     // a box of no size: the draw's shape does not come from the positions read (an NPC's speech bubble panel, built
     // from its constants) - its extent is unknown, it is left as drawn
     if (box[2] - box[0] < 0.5f && box[3] - box[1] < 0.5f) {

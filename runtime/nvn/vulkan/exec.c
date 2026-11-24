@@ -6867,6 +6867,37 @@ static float ui_scale_factor(void) {
     if (env > 0) return env < UI_SCALE_MIN / 100.0f ? UI_SCALE_MIN / 100.0f : env > 1.0f ? 1.0f : env;
     return ui_scale_percent(g_settings.ui_scale) / 100.0f;
 }
+// [XCDE] GitHub #243: screen-space bounding box (guest pixels) of a single-instance 2D UI quad from vertex cbuf 3
+// and attribute 0 float positions (RG32F/RGB32F/RGBA32F). false when the draw is not a 2D cbuf-3 quad.
+static bool ui_draw_quad_box(CmdRec *r, bool indexed, float box[4]) {
+    if (!st.ubuf[0][0].addr || st.ubuf[0][0].size < 32 || !st.rt.color[0]) return false;
+    const float *m = (const float *)(uintptr_t)st.ubuf[0][0].addr;
+    uint32_t count = (uint32_t)r->x[2], inst = (uint32_t)(indexed ? r->x[6] : r->x[4]);
+    uint8_t afmt = st.nattrib > 0 ? (uint8_t)(st.attrib[0] & 0xFF) : 0;
+    if (inst > 1 || !count || count > 64 || (afmt != 0x16 && afmt != 0x22 && afmt != 0x2e)) return false;
+    uint32_t a = st.attrib[0], stream = (a >> 8) & 0x1F, off = a >> 13;
+    uint32_t stride = stream < (uint32_t)st.nstream ? st.stream[stream][0] : 0;
+    uint64_t vb = stream < 16 ? st.vbuf[stream].addr : 0, vsz = stream < 16 ? st.vbuf[stream].size : 0;
+    float lx0 = 0, ly0 = 0, lx1 = 0, ly1 = 0;
+    bool any = false;
+    for (uint32_t i = 0; vb && stride && i < count; i++) {
+        int64_t v;
+        if (indexed) {
+            uint32_t it = (uint32_t)r->x[1];
+            const void *ip = (const void *)(uintptr_t)r->x[3];
+            if (!ip) break;
+            v = it == 1 ? ((const uint16_t *)ip)[i] : it == 2 ? ((const uint32_t *)ip)[i] : ((const uint8_t *)ip)[i];
+            v += (int32_t)r->x[4];
+        } else v = (int64_t)r->x[1] + i;
+        if (v < 0 || (uint64_t)v * stride + off + 8 > vsz) continue;
+        const float *p = (const float *)(uintptr_t)(vb + (uint64_t)v * stride + off);
+        if (!isfinite(p[0]) || !isfinite(p[1])) continue;
+        if (!any) { lx0 = lx1 = p[0]; ly0 = ly1 = p[1]; any = true; }
+        else { lx0 = fminf(lx0, p[0]); lx1 = fmaxf(lx1, p[0]); ly0 = fminf(ly0, p[1]); ly1 = fmaxf(ly1, p[1]); }
+    }
+    if (!any) return false;
+    return ui_scale_box(m, lx0, ly0, lx1, ly1, st.viewport[0], box);
+}
 // The current UI draw's anchor (guest pixels) from its element box: the clip-space transform at the start of vertex
 // cbuf 3 applied to the vertex positions (attribute 0, two floats) of a small single-instance draw, or to its
 // origin alone (instanced text: the string's start). false: not a 2D UI element, or it covers the frame.
@@ -7425,11 +7456,22 @@ static void draw_(CmdRec *r, bool indexed) {
             if ((tex_sc[1][i][0] != 1 || tex_sc[1][i][1] != 1) && tex_wh[1][i][0] == st.rt.color[0]->width &&
                 tex_wh[1][i][1] == st.rt.color[0]->height)
                 scene_read = true;
-        bool fullscreen_quad = r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
+        uint32_t draw_inst = (uint32_t)(indexed ? r->x[6] : r->x[4]);
+        bool fullscreen_quad = draw_inst <= 1 && r->x[2] <= 6 && st.viewport[0][0] == 0 && st.viewport[0][1] == 0 &&
                                st.viewport[0][2] >= st.rt.color[0]->width && st.viewport[0][3] >= st.rt.color[0]->height;
         // Only a full-target quad is allowed to fill the window; every other draw (panels, bars, menus) keeps the box.
         bool reads_scene = fullscreen_quad && scene_read;
         bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad;
+        // [XCDE] GitHub #243: untextured 2D UI quads (e.g. colored level bar fills in the Arts menu) share the full
+        // 1280x720 viewport and the a685500922f4ead7 / a7e0523761a10e91 UI shader with the #183 warp/menu fade. Only
+        // a quad whose transformed 2D box actually covers the guest frame is a fullscreen fill; smaller UI quads stay
+        // in the centred 16:9 box so they align with their textured outlines on non-16:9 aspect ratios.
+        if (fullscreen_fill) {
+            float qbox[4];
+            if (ui_draw_quad_box(r, indexed, qbox) &&
+                !ui_scale_is_full_frame(qbox, (float)st.rt.color[0]->width, (float)st.rt.color[0]->height))
+                fullscreen_fill = false;
+        }
         if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) reads_scene = true;
         // [XCDE] V9: a full-target pass into the window that samples ANY scene-scaled texture is a composite of the scene
         // even when none of its textures has exactly the window texture's size (post effects that read a smaller or
