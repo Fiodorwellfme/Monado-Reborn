@@ -25,6 +25,7 @@
 #include "../../runtime/host/utf8_path.h"  // [XCDE] T277: GitHub #218 - UTF-8 paths through the wide Windows APIs
 #include "../../runtime/nvn/vulkan/gpu_scan.h"
 #include "../../runtime/ui/gpu_picker.h"
+#include "../../runtime/ui/monado_icon.h"
 #include "../../runtime/ui/theme.h"
 #include "../../runtime/ui/quality_controls.h"
 #include "../../runtime/ui/cheats_controls.h"  // [XCDE] cheats: the same controls as the F1 menu
@@ -3035,12 +3036,14 @@ int main(int argc, char **argv) {
     g_llog = xcde_utf8_fopen((g_root + "/build/launcher.log").c_str(), "w");
 #endif
     llog("launcher start, root %s", g_root.c_str());
+    monado_prepare_window_icon_hints();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         llog("SDL_Init with gamepads failed (%s): video only", SDL_GetError());
         if (!SDL_Init(SDL_INIT_VIDEO)) return fail("Could not start SDL (video).");
     }
     SDL_Window *win = SDL_CreateWindow("Monado - Launcher", 1100, 820, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!win) return fail("Could not create the launcher window.");
+    monado_apply_window_icon(win);
     SDL_Renderer *ren = SDL_CreateRenderer(win, NULL);
     if (!ren) {  // (an old or missing graphics driver: the CPU renderer still shows the launcher)
         llog("GPU renderer failed (%s): software renderer", SDL_GetError());

@@ -44,7 +44,8 @@ bool rt_remove_game_files(const char *game_dir);
 unsigned long long rt_game_files_size(const char *game_dir);
 
 typedef struct SDL_Window SDL_Window;
-void rt_window_icon(SDL_Window *w);  // the shipped icon.png, if any
+void rt_window_icon_hints(void);     // call before SDL_Init(SDL_INIT_VIDEO) for Win32 class icon
+void rt_window_icon(SDL_Window *w);  // embedded Monado icon (or shipped icon.png if present)
 
 #ifdef __cplusplus
 }
