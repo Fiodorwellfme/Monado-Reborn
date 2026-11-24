@@ -269,6 +269,7 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn('fseek(f, 0, SEEK_SET) == 0', helper)
         self.assertIn('fread(buf, 1, (size_t)n, f) == (size_t)n', helper)
         self.assertIn('if (glsl_dir && *glsl_dir)', exec_code)  # set-but-empty is no override directory, as in the signature
+        self.assertIn('xcde_utf8_getenv("XCDE_GLSL_DIR"', exec_code)  # (a non-ASCII debug path is UTF-8 here, as in the signature)
         self.assertEqual(exec_code.count('read_glsl_override(glsl_dir,'), 2)
 
     def test_variant_files_must_match_the_exec_record_abi_before_jobs_are_created(self):
@@ -479,6 +480,31 @@ class BuilderAndLauncherContracts(unittest.TestCase):
         self.assertIn('PcForce force(fresh)', start)
         self.assertNotIn('precompile_done.txt', start)
         self.assertIn('pc_start(false, true)', launcher)  # (the button; --shot uses it too)
+
+    def test_play_and_precompile_save_pending_settings_before_asking(self):
+        # The status probe and the precompile child read xcde.ini, not the launcher's in-memory settings. A changed GPU
+        # policy must be written before either, or the probe approves (or the child warms) the previous policy and the
+        # game starts with the new one.
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        main = launcher[launcher.index('Cfg saved_cfg;'):]
+        self.assertIn('auto save_pending = [&]() -> bool {', main)
+        self.assertIn('if (g_mod_dirty || memcmp(&saved_cfg, &g, sizeof g) != 0) {', main)
+        self.assertIn('pc_forget();', main[:main.index('static const int shot_section')])
+        self.assertIn('if (!save()) { g_status = T("No se pudieron guardar los ajustes"); return false; }', main)
+
+        play = launcher[launcher.index('if (ImGui::Button(T("JUGAR")'):
+                         launcher.index('ImGui::PopStyleColor(3);', launcher.index('if (ImGui::Button(T("JUGAR")'))]
+        self.assertIn('if (save_pending()) {', play)
+        self.assertLess(play.index('save_pending()'), play.index('pc_status(true)'))
+
+        button = launcher[launcher.index('if (ImGui::Button(T("Precompilar shaders")))'):
+                          launcher.index('ImGui::SetItemTooltip', launcher.index('if (ImGui::Button(T("Precompilar shaders")))'))]
+        self.assertIn('save_pending() && pc_start(false, true)', button)
+
+        gc_play = launcher[launcher.index('if (g_gc_play_now) {'):
+                           launcher.index('if (pc_running()) {', launcher.index('if (g_gc_play_now) {'))]
+        self.assertIn('if (save_pending()) {', gc_play)
+        self.assertLess(gc_play.index('save_pending()'), gc_play.index('pc_status(true)'))
 
     def test_the_builder_asks_the_runtime(self):
         builder = (ROOT / 'tools/gamebuild/gamebuild.py').read_text(encoding='utf-8')

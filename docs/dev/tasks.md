@@ -1878,3 +1878,6 @@ Detalle: `docs/PERFORMANCE_UI.md`. Evidencia: `docs/evidence/2026-11-04-performa
   variant record size; return a distinct persistence-disabled status; separate large-file scan slots; fail incomplete
   directory walks; use shared 64-bit Windows metadata for game files and caches with a sparse 3 GiB native test; hash
   `XCDE_GLSL_DIR` override bytes.
+- [x] T282 PR #247 final review: PLAY/precompile save pending settings before the runtime reads `xcde.ini`; clearing the
+  cache removes loose `.spv` files and stale footer text and is disabled during a run; `XCDE_GLSL_DIR` is read as UTF-8
+  and a file path there is treated as no override directory.

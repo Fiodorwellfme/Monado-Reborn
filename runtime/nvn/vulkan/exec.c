@@ -2548,7 +2548,8 @@ static void compile_program(void *arg) {
     char *fs_tmaa = NULL;
     { const char *b = tmaa_texel_src(p->src[1], fs_src, &fs_tmaa); if (b) fs_src = b; }
     char *fs_over = NULL;
-    const char *glsl_dir = getenv("XCDE_GLSL_DIR");
+    char glsl_dir_env[1100];
+    const char *glsl_dir = xcde_utf8_getenv("XCDE_GLSL_DIR", glsl_dir_env, sizeof glsl_dir_env) ? glsl_dir_env : NULL;
     if (glsl_dir && *glsl_dir) {  // [XCDE] debugging: a hand-edited fragment shader (<dir>/<code addr>_fs.glsl) replaces the translated one
         fs_over = read_glsl_override(glsl_dir, (unsigned long long)p->code[1], "fs", "fragment");
         if (fs_over) fs_src = fs_over;

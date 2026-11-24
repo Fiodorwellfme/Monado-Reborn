@@ -314,6 +314,16 @@ int main(void) {
     }
     RMDIR(overrides);
 
+    // A path that names a file is not an override directory: exec.c ignores it, so the signature must not turn the whole
+    // dump unreadable (the same applies to a missing directory, tested above through the env-value loop).
+    write_file("not-a-dir", "x", 1);
+    char not_a_dir[1200];
+    path_of(not_a_dir, sizeof not_a_dir, "not-a-dir");
+    set_env("XCDE_GLSL_DIR", not_a_dir);
+    CHECK(sig_of("dump", a));
+    clear_env();
+    remove_file("not-a-dir");
+
     // The shipped variant seed: new recorded variants mean new jobs to warm.
     CHECK(sig_of("dump", a));
     write_file("seed.bin", "a bigger seed file", 18);

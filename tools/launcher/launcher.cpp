@@ -1214,6 +1214,7 @@ static void pc_env_changed() {
     g_pc_current = pc_persistence_disabled() ? PC_STATUS_DISABLED : PC_STATUS_STALE;
     g_pc_retry_at = 0;
     g_pc_no_auto_retry = false;
+    g_status.clear();  // (the footer must not keep the previous "shaders prepared" line after an input changed)
 }
 static bool pc_running() {
 #ifdef _WIN32
@@ -2205,6 +2206,17 @@ static void open_or_create_folder(const char *rel) {
 #endif
 }
 
+static void clear_loose_spv_dir(const std::string &dir) {
+    // A loose SPIR-V entry is a file directly in cache/spirv. Do not recurse: a directory there is not ours to delete.
+    SDL_EnumerateDirectory(dir.c_str(), [](void *, const char *dirname, const char *fname) -> SDL_EnumerationResult {
+        if (!fname || !*fname) return SDL_ENUM_CONTINUE;
+        std::string full = std::string(dirname) + fname;
+        SDL_PathInfo pi;
+        if (SDL_GetPathInfo(full.c_str(), &pi) && pi.type == SDL_PATHTYPE_FILE) SDL_RemovePath(full.c_str());
+        return SDL_ENUM_CONTINUE;
+    }, NULL);
+    SDL_RemovePath(dir.c_str());
+}
 static void clear_shader_cache() {
     static const char *const files[] = {
         "cache/spirv.pack", "cache/spirv.idx", "cache/vk_pipelines.bin", "cache/variants.bin",
@@ -2212,8 +2224,9 @@ static void clear_shader_cache() {
         "cache/precompile_done.txt", "cache/precompile_loose_done.txt"
     };
     for (const char *f : files) SDL_RemovePath(path(f).c_str());
-    SDL_RemovePath(path("cache/spirv").c_str());
+    clear_loose_spv_dir(path("cache/spirv"));  // (loose SPIR-V mode: the individual .spv files are the cache)
     pc_forget();  // (the cache the memoized CURRENT/STALE answer described is gone)
+    g_status.clear();  // (and the footer must not keep the old "shaders prepared" line)
 }
 
 static void tab_diagnostics() {
@@ -2228,6 +2241,7 @@ static void tab_diagnostics() {
     if (!cache_measured) { cache_bytes = dir_size_bytes(path("cache")); cache_measured = true; }
     ImGui::Text(en ? "Shader / pipeline cache size: %.1f MiB" : "Tamaño de la caché de shaders / pipelines: %.1f MiB",
                 (double)cache_bytes / (1024.0 * 1024.0));
+    ImGui::BeginDisabled(pc_running() || gc_running());
     if (ImGui::Button(en ? "Clear shader cache" : "Limpiar caché de shaders")) {
         if (confirm_clear) {
             clear_shader_cache();
@@ -2240,6 +2254,7 @@ static void tab_diagnostics() {
             confirm_at = SDL_GetTicks();
         }
     }
+    ImGui::EndDisabled();
     if (confirm_clear && SDL_GetTicks() - confirm_at > 3000) confirm_clear = false;
     if (confirm_clear) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1, 0.75f, 0.25f, 1), "%s", en ? "Click again to confirm." : "Pulsa otra vez para confirmar."); }
     else if (cache_cleared) { ImGui::SameLine(); ImGui::TextDisabled("%s", en ? "Cache cleared." : "Caché limpiada."); }
@@ -3233,6 +3248,19 @@ int main(int argc, char **argv) {
     bool have_exe = exists(GAME_EXE);
     bool run = true, launched = false;
     Cfg saved_cfg; memcpy(&saved_cfg,&g,sizeof g);
+    // [review] The status probe and the precompile child read xcde.ini, not the in-memory settings: a changed GPU policy
+    // must reach the file before either asks the runtime whether the cache is current, or the probe would approve (or the
+    // child warm) the previous policy and the game would start with the new one. PLAY and the explicit precompile save
+    // pending settings first; a failed save keeps the error and does not start either.
+    auto save_pending = [&]() -> bool {
+        if (g_mod_dirty || memcmp(&saved_cfg, &g, sizeof g) != 0) {
+            pc_forget();  // (the memoized answer described the old settings and/or environment)
+            if (!save()) { g_status = T("No se pudieron guardar los ajustes"); return false; }
+            memcpy(&saved_cfg, &g, sizeof g);
+            g_mod_dirty = false;
+        }
+        return true;
+    };
     static const int shot_section[] = {1, 2, 4, 5, 0, 6, 3};  // --shot tab: graphics, controls, audio, mods, home, diagnostics, cheats
     int section=shot ? (shot_tab >= 0 && shot_tab < 7 ? shot_section[shot_tab] : 0) : 0;
     uint64_t last_input=SDL_GetTicks(); bool got_event=false;
@@ -3345,8 +3373,10 @@ int main(int argc, char **argv) {
         if (gc_running()) ImGui::ProgressBar(g_gc_frac, ImVec2(-1, 0), g_gc_text.c_str());
         if (g_gc_play_now) {
             g_gc_play_now = false;
-            if (pc_status(true) == PC_STATUS_STALE) pc_start(true);
-            else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            if (save_pending()) {
+                if (pc_status(true) == PC_STATUS_STALE) pc_start(true);
+                else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            }
         }
         if (pc_running()) {
             ImGui::ProgressBar(g_pc_frac, ImVec2(-150 * scale, 0), g_pc_text.c_str());
@@ -3368,10 +3398,11 @@ int main(int argc, char **argv) {
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.90f, 0.20f, 0.30f, 1));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.96f, 0.30f, 0.38f, 1));
         if (ImGui::Button(T("JUGAR"), ImVec2(200 * scale, 0))) {
-            if (g_mod_dirty || memcmp(&saved_cfg,&g,sizeof g)!=0) pc_forget();  // [review] (the env rows are a signature input)
-            if (!gc_ready()) gc_start(true);
-            else if (pc_status(true) == PC_STATUS_STALE) pc_start(true);
-            else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            if (save_pending()) {  // (the status probe and the precompile must read the settings PLAY is about to use)
+                if (!gc_ready()) gc_start(true);
+                else if (pc_status(true) == PC_STATUS_STALE) pc_start(true);
+                else { launch(); launched = g_launched_ok; if (launched) run = false; }
+            }
         }
         ImGui::PopStyleColor(3);
         ImGui::EndDisabled();
@@ -3379,7 +3410,8 @@ int main(int argc, char **argv) {
         ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc || pc_persistence_disabled());
         if (ImGui::Button(T("Precompilar shaders"))) {  // [XCDE] T281: also retries the jobs on the crash skip list
             bool retry = exists("cache/precompile_skip.txt");
-            if (pc_start(false, true) && retry) g_status = T("Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)");
+            if (save_pending() && pc_start(false, true) && retry)
+                g_status = T("Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)");
         }
         ImGui::SetItemTooltip("%s", g.ui_lang ? "Prepare every shader ahead of time, so new areas don't stop to compile them. Progress is kept."
                                               : "Prepara todos los shaders por adelantado, para que las zonas nuevas no se paren a compilarlos. El progreso se conserva.");

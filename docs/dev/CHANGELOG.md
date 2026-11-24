@@ -511,11 +511,16 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
   `pipeline_whole()`'s `cba[8]`/`write_mask[8]`; the game's own prewarm uses the same validator.
 - The effective `xcde.ini` GPU pipeline policy (`gpu_profile` compatibility, `gpu_gpl` on/off) is loaded before
   `LARECOMP_HIDDEN` makes `settings_load()` ignore the file, and is part of the cache signature. The precompile now warms
-  the same libraries/whole pipelines the game will ask for, and changing the policy invalidates the cache.
+  the same libraries/whole pipelines the game will ask for, and changing the policy invalidates the cache. PLAY and the
+  explicit precompile save pending settings before the status probe/child starts: the probe and the child read
+  `xcde.ini`, so without the save they could approve (or warm) the previous policy while the game starts with the new one.
+- Diagnostics environment edits and "Clear shader cache" also drop the footer's previous status line. The clear button
+  is disabled while a precompile or game-code build is running, so it cannot delete cache files underneath it, and it
+  removes the loose `cache/spirv/*.spv` files too (previously the non-empty directory was left in place).
 - A status probe that takes a second or more is no longer retried automatically from the launcher's render path; the
   retry deadline is measured after the probe, and only PLAY or another explicit action retries a slow UNKNOWN.
 - "Clear shader cache" removes `cache/precompile_done.txt` and `cache/precompile_loose_done.txt` (the old code removed the
   never-written `cache/precompile_sig.txt`) and drops the memoized status, so the next frame cannot keep reporting CURRENT.
-- Validation: 255 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
+- Validation: 258 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
   targeted Clang syntax checks for `precompile.c`/`exec.c`, and the Linux launcher syntax check pass. Windows execution is
   still pending; the sparse-file test is included in the Windows validation suite.

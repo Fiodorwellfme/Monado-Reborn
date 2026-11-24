@@ -359,7 +359,24 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('cache/precompile_done.txt', clear)
         self.assertIn('cache/precompile_loose_done.txt', clear)
         self.assertNotIn('cache/precompile_sig.txt', clear)  # (that was never written)
+        self.assertIn('clear_loose_spv_dir(path("cache/spirv"))', clear)  # (loose mode: the .spv files are the cache)
         self.assertIn('pc_forget();', clear)  # (otherwise the next frame keeps reporting CURRENT)
+        self.assertIn('g_status.clear();', clear)  # (the footer's old "shaders prepared" line is not still true)
+
+    def test_an_environment_edit_clears_the_old_status_line(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        changed = launcher[launcher.index('static void pc_env_changed() {'):launcher.index('static bool pc_running() {')]
+        self.assertIn('g_pc_current = pc_persistence_disabled() ? PC_STATUS_DISABLED : PC_STATUS_STALE;', changed)
+        self.assertIn('g_status.clear();', changed)
+
+    def test_the_cache_clear_button_is_disabled_during_a_run(self):
+        launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
+        diagnostics = launcher[launcher.index('static void tab_diagnostics() {'):
+                               launcher.index('static void make_report() {')]
+        clear = diagnostics[diagnostics.index('ImGui::BeginDisabled(pc_running() || gc_running());'):
+                            diagnostics.index('ImGui::EndDisabled();', diagnostics.index('ImGui::BeginDisabled(pc_running() || gc_running());'))]
+        self.assertIn('Clear shader cache', clear)
+        self.assertIn('clear_shader_cache();', clear)
 
     def test_home_and_footer_report_unverified_shaders_honestly(self):
         launcher = (ROOT / 'tools/launcher/launcher.cpp').read_text(encoding='utf-8')
@@ -410,7 +427,7 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('if (pc_persistence_disabled())', start)  # (the --shot path must not run a no-stamp pass)
         self.assertIn('g_status = pc_idle_text(PC_STATUS_DISABLED);', start)
         self.assertNotIn('pc_status()', start)  # a manual run must not block on a full status walk
-        self.assertIn('if (pc_start(false, true) && retry)', launcher)
+        self.assertIn('if (save_pending() && pc_start(false, true) && retry)', launcher)
         self.assertIn('if (pc_start(then_play))', launcher)
         self.assertIn('pc_persistence_disabled()', launcher)  # (the explicit button uses the applied environment)
         diagnostics = launcher[launcher.index('static void tab_diagnostics() {'):

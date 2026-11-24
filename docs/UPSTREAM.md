@@ -283,7 +283,9 @@ Details and the reporter's log evidence: [CHANGELOG](dev/CHANGELOG.md).
   before the window is shown and never while a run is in flight) instead of comparing the executable; the explicit
   Precompile button passes `XCDE_PRECOMPILE_FORCE=1` (the runtime clears the crash/in-flight lists and redoes the
   passes; a failed spawn cannot lose the stamp) and exit code 2 does not start a doomed run. A slow UNKNOWN probe is not
-  retried from the render path, and "Clear shader cache" removes both done stamps and drops the memoized status.
+  retried from the render path, and "Clear shader cache" removes both done stamps, the loose `.spv` files and the
+  memoized status. PLAY and the explicit precompile save pending settings first, because the probe and the child read
+  `xcde.ini`; a changed GPU policy otherwise leaves them approving/warming the old one.
 - `tools/gamebuild/gamebuild.py`: `precompile_status` runs the same status command (timeout; 0/1/2/3 kept apart) and
   `precompile_is_current` is its `== 0`.
 - `tests/native/test_precompile_sig.c` (new), `scripts/native_tests_linux.sh`, `tests/unit/test_precompile_incremental.py`

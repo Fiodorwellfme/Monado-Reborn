@@ -143,7 +143,7 @@ static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, 
 // well, with a warning, instead of making every shader look unreadable. The bytes are streamed, so any file size works.
 static bool mix_glsl_dir(const char *dir, uint64_t *sum, uint64_t *files) {
     XcdeDir *dd = xcde_opendir(dir);
-    if (!dd) return errno == ENOENT || !*dir;  // a missing override directory simply supplies no files
+    if (!dd) return errno == ENOENT || errno == ENOTDIR || !*dir;  // (missing, or a file: no override directory)
     XcdeDirent *e;
     while ((e = xcde_readdir(dd))) {
         size_t n = strlen(e->d_name);
