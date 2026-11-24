@@ -1452,7 +1452,7 @@ void backend_present(NvnTexture *t) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
         double ratio = dw / dh;
         bool probe = g_settings.aspect == ASPECT_UNLOCKED && ratio >= 4.0 / 3.0 - 0.005 &&
-                     ratio <= 32.0 / 9.0 + 0.005 && fabs(ratio / (16.0 / 9.0) - 1.0) > 0.005 &&
+                     ratio <= 48.0 / 9.0 + 0.005 && fabs(ratio / (16.0 / 9.0) - 1.0) > 0.005 &&
                      !getenv("LARECOMP_NO_SCALE");
         bool was_probing = atomic_load(&aspect_probe);
         // [XCDE] V9: the main camera is not updated on every frame in the character menus, the map and similar screens, so
@@ -1474,7 +1474,7 @@ void backend_present(NvnTexture *t) {
             int key = (probe ? 1 : 0) | (scene ? 2 : 0) | (movie ? 4 : 0) | (g_settings.aspect == ASPECT_UNLOCKED ? 8 : 0);
             if (key != dbg_key) {
                 dbg_key = key;
-                LOG("[aspect-state] setting=%s probe=%d scene=%d movie=%d window=%.0fx%.0f (probe needs setting=unlocked and 4:3..32:9)\n",
+                LOG("[aspect-state] setting=%s probe=%d scene=%d movie=%d window=%.0fx%.0f (probe needs setting=unlocked and 4:3..48:9)\n",
                     g_settings.aspect == ASPECT_UNLOCKED ? "unlocked" : "original", probe, scene, movie, dw, dh);
             }
         }

@@ -243,7 +243,7 @@ struct Cfg {
     int display_index = -1;
     int aspect = ASPECT_UNLOCKED;
     int ui_scale = 100;     // GitHub #121: HUD size in % (50..100), runtime/ui_scale.h
-    int win = 0;            // index into k_wins
+    int win_w = 1280, win_h = 720;  // window size (xcde.ini "window = WxH"); preserves custom sizes
     int res = 0;            // index into k_res
     int upscaler = 1;       // 0 bilinear, 1 FSR 1, 2 FSR 3.1, 3 DLSS
     float sharpness = -1.0f;  // [XCDE] RCAS strength 0..1; < 0: each upscaler's default (xcde.ini upscale_sharpness)
@@ -765,7 +765,13 @@ static void load() {
         else if (!strcmp(k, "display_index")) g.display_index = std::clamp(atoi(v), -1, 15);
         else if (!strcmp(k, "aspect")) g.aspect = !strcmp(v, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(k, "ui_scale")) g.ui_scale = ui_scale_percent(atoi(v));
-        else if (!strcmp(k, "window") && (i = find(k_wins, k_nwins, v)) >= 0) g.win = i;
+        else if (!strcmp(k, "window")) {
+            int w, h;
+            if (xcde_window_size_parse(v, &w, &h)) {
+                g.win_w = w < 320 ? 320 : w;
+                g.win_h = h < 180 ? 180 : h;
+            }
+        }
         else if (!strcmp(k, "resolution") && (i = find(k_res_ini, 8, v)) >= 0) g.res = i;
         else if (!strcmp(k, "upscaler")) { g.upscaler_auto = !strcmp(v, "auto"); g.upscaler = !strcmp(v, "fsr") || g.upscaler_auto ? 1 : !strcmp(v, "fsr3") ? 2 : !strcmp(v, "dlss") ? 3 : !strcmp(v, "fsr4lite") ? 4 : 0; }
         else if (!strcmp(k, "upscale_quality") && (i = find(k_uq_ini, 5, v)) >= 0) g.uquality = i;
@@ -880,9 +886,9 @@ static bool save() {
     fprintf(f, "session_fix = %s\n", g.session_fix == 1 ? "on" : g.session_fix == 0 ? "off" : "auto");
     gfx_save(f, &g.graphics);  // [XCDE]
     fprintf(f,"low_memory = %d\ndynamic_min_height = %d\ndynamic_max_height = %d\neffects_off = %u\n",g.gpu_performance,g.dynamic_min_height,g.dynamic_max_height,g.effects_off);
-    fprintf(f, "fullscreen = %d\nfullscreen_mode = %s\ndisplay_index = %d\nwindow = %s\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n",
+    fprintf(f, "fullscreen = %d\nfullscreen_mode = %s\ndisplay_index = %d\nwindow = %dx%d\nresolution = %s\nupscaler = %s\nantialias = %s\nshow_fps = %d\n",
             g.fullscreen, g.fullscreen_mode == FULLSCREEN_EXCLUSIVE ? "exclusive" : "borderless", g.display_index,
-            k_wins[g.win], k_res_ini[g.res], g.upscaler_auto ? "auto" : k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
+            g.win_w, g.win_h, k_res_ini[g.res], g.upscaler_auto ? "auto" : k_ups_ini[g.upscaler], g.smaa ? "smaa" : "off", g.show_fps);
     fprintf(f, "aspect = %s\n", g.aspect == ASPECT_ORIGINAL ? "original" : "auto");
     fprintf(f, "ui_scale = %d\n", ui_scale_percent(g.ui_scale));
     fprintf(f, "vulkan_api = %s\nfps_overlay = %d\n", g.vulkan_api == 12 ? "1.2" : g.vulkan_api == 13 ? "1.3" : g.vulkan_api == 14 ? "1.4" : "auto", g.fps_overlay);
@@ -2478,7 +2484,25 @@ static void tab_graphics() {
         ? "Shrinks the field and battle HUD towards its corners. Menus keep the game's own size.\nAlso in the game's F1 menu, Graphics tab (applies at once)."
         : "Reduce el HUD de exploración y combate hacia sus esquinas. Los menús mantienen el tamaño del juego.\nTambién en el menú F1 del juego, pestaña Gráficos (se aplica al instante).");
     ImGui::SetNextItemWidth(260 * g_scale);
-    monado_combo(T("Tamaño de la ventana"), &g.win, k_wins, k_nwins);
+    {
+        int wi = xcde_window_size_index(g.win_w, g.win_h);
+        char current[48];
+        if (wi >= 0) snprintf(current, sizeof current, "%s", k_wins[wi]);
+        else snprintf(current, sizeof current, g.ui_lang ? "Custom (%dx%d)" : "Personalizado (%dx%d)", g.win_w, g.win_h);
+        if (monado_begin_combo(T("Tamaño de la ventana"), current)) {
+            for (int i = 0; i < k_nwins; i++) {
+                if (ImGui::Selectable(k_wins[i], i == wi)) {
+                    int w, h;
+                    if (xcde_window_size_parse(k_wins[i], &w, &h)) {
+                        g.win_w = w;
+                        g.win_h = h;
+                    }
+                }
+                if (i == wi) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
     ImGui::SeparatorText(T("Resolución y escalado"));
     ImGui::SetNextItemWidth(360 * g_scale);
     monado_combo(T("Resolución interna"), &g.res, TL(k_res_ui, 8).p, 8);

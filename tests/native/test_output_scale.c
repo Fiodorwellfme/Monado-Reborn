@@ -47,5 +47,14 @@ int main(void) {
     output_scale(2560,1440,false,39,5,&o); assert(lround(o.sx*1280)==856 && lround(o.sy*720)==480);
     g_settings.upscale_quality=UQ_NATIVE;
     output_scale(2560,1440,false,40,5,&o); assert(lround(o.sx*1280)==2560 && lround(o.sy*720)==1440);
-    puts("output scale: absolute limits, CPU bottleneck, profile switching, 1.5x and the 8-pixel grid passed"); return 0;
+    // 48:9 triple-monitor (5760x1080): shape = 3.0, fills the window when reshaped, and snaps cleanly for temporal upscalers.
+    g_settings.res_mode=RES_MATCH; g_settings.upscaler=UPSCALE_FSR1;
+    output_scale(5760,1080,true,41,5,&o);
+    assert(fabs(o.shape-3.0)<.001 && lround(o.sx*1280)==5760 && lround(o.sy*720)==1080);
+    assert(fabs(o.vw-5760)<.001 && fabs(o.vh-1080)<.001 && fabs(o.vx)<.001 && fabs(o.vy)<.001);
+    g_settings.upscaler=UPSCALE_FSR3; g_settings.upscale_quality=UQ_QUALITY;
+    output_scale(5760,1080,true,42,5,&o);
+    assert(lround(o.sx*1280)==3840 && lround(o.sy*720)==720);
+    assert(fabs(o.vw-5760)<.001 && fabs(o.vh-1080)<.001);
+    puts("output scale: absolute limits, CPU bottleneck, profile switching, 1.5x, 48:9 and the 8-pixel grid passed"); return 0;
 }
