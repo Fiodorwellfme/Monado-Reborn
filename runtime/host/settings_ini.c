@@ -152,13 +152,8 @@ void settings_load(void) {
         else if (!strcmp(k, "audio_channels")) g_settings.audio_channels = audio_out_parse(v);  // [XCDE]
         else if (!strcmp(k, "movie_audio")) g_settings.movie_audio = atoi(v) != 0;
         else if (!strcmp(k, "show_fps")) g_settings.show_fps = atoi(v) != 0;
-        else if (!strcmp(k, "fps")) {
-            static const char *names[] = {"30", "60", "120", "144", "165", "unlimited", "0", "unl\xc3\xadmited", "ilimitado"};
-            static const int rates[] = {30, 60, 120, 144, 165, 0, 0, 0, 0};
-            g_settings.fps = 30;
-            for (unsigned i = 0; i < sizeof rates / sizeof rates[0]; ++i)
-                if (!strcmp(v, names[i])) { g_settings.fps = rates[i]; break; }
-        }
+        else if (!strcmp(k, "fps")) g_settings.fps = xcde_fps_parse(v);
+        else if (!strcmp(k, "fps_limiter")) g_settings.fps_limiter = xcde_fps_limiter_parse(v);
         else if (!strcmp(k, "language")) g_settings.language = lang_index(v);
         else if (!strncmp(k, "mod_", 4)) mod_set(k + 4, atoi(v) != 0);
         else if (!strcmp(k, "button_icons")) snprintf(g_button_icons, sizeof g_button_icons, "%s", v);
@@ -239,6 +234,7 @@ void settings_save(void) {
             audio_out_ini[audio_out_valid(g_settings.audio_channels)], g_settings.movie_audio,
             g_settings.show_fps);
     if (g_settings.fps) fprintf(f, "fps = %d\n", g_settings.fps); else fprintf(f, "fps = unlimited\n");
+    fprintf(f, "fps_limiter = %s\n", xcde_fps_limiter_ini[xcde_fps_limiter_valid(g_settings.fps_limiter)]);
     fprintf(f, "language = %s\n", g_settings.language > 0 && g_settings.language < N_LANGUAGES ? g_language_codes[g_settings.language] : "auto");
     for (int i = 0; i < g_nmods; i++) fprintf(f, "mod_%s = %d\n", g_mods[i].name, g_mods[i].on);
     fprintf(f, "button_icons = %s\n", g_button_icons);

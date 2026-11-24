@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include "grass_lod.h"
 #include "graphics_options.h"
+#include "fps_limiter.h"
 #include "audio_options.h"  // [XCDE] audio output channel mode (auto / stereo / 5.1)
 #ifdef __cplusplus
 extern "C" {
@@ -60,7 +61,8 @@ typedef struct {
     int fps_overlay_pos;   // GitHub #147: PERF_POS_* corner (xcde.ini fps_overlay_position)
     bool upscaler_auto;   // T257: DLSS SR when the SDK confirms support, otherwise FSR 1
     int vulkan_api;       // T256: 0 automatic, 12/13/14 requested backend route (restart)
-    int fps;  // [XCDE] frame rate target: 30 (the game's own), 60, 120, 144..., 0 = unlimited (runtime/hle/framepace.c)
+    int fps;  // [XCDE] frame rate target: 30 (the game's own), 60, 120, 144..., custom 15..1000, 0 = unlimited (runtime/hle/framepace.c)
+    int fps_limiter;  // [XCDE] FPS_LIMITER_*: default (game limiter) or early (RTSS / MangoHud style host cap)
     bool dpad_move;      // the d-pad (and arrow keys) move Link like the stick
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
     float run_speed;     // [XCDE] GitHub #100: player movement multiplier (1.0 original, 1.5, 2.0): runtime/hle/party.c

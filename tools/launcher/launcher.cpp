@@ -238,7 +238,8 @@ struct Cfg {
     Settings cheats = {};       // [XCDE] Monado II cheats: only the cheat_* fields are used; the controls, keys and
                                 // validation are the game's (runtime/cheats_options.h)
     bool show_fps = false;
-    int fps = 0;  // index into k_fps_ini
+    int fps = 30;           // target FPS (15..1000, 0 = unlimited)
+    int fps_limiter = FPS_LIMITER_DEFAULT;  // [XCDE] default (game) or early (RTSS / MangoHud style)
     int volume = 100;
     int audio_channels = AUDIO_OUT_AUTO;  // [XCDE] AUDIO_OUT_*: auto / stereo / 5.1
     bool movie_audio = true;
@@ -281,7 +282,6 @@ static const char *const k_res_ini[] = {"match", "1", "1.5", "2", "3", "75%", "5
 static const char *const k_res_ui[] = {"Igual que la ventana (recomendado)", "1x - 720p (como Switch)", "1.5x - 1080p",
                                        "2x - 1440p", "3x - 2160p (4K)", "75% de la ventana", "50% de la ventana",
                                        "Dinámica (según rendimiento)"};
-static const char *const k_fps_ini[] = {"30", "60", "120", "144", "165", "unlimited"};
 static const char *const k_lang_ini[] = {"auto", "en-US", "es", "fr", "de", "it", "ja", "ko", "zh-Hans", "zh-Hant"};
 static const char *const k_lang_ui[] = {"Inglés (por defecto)", "Inglés", "Español", "Francés", "Alemán", "Italiano", "Japonés", "Coreano", "Chino simplificado", "Chino tradicional"};
 
@@ -736,7 +736,8 @@ static void load() {
         else if (!strcmp(k, "dynamic_max_height")) g.dynamic_max_height=std::clamp(atoi(v),0,4320);
         else if (!strcmp(k, "effects_off")) g.effects_off=(unsigned)strtoul(v,nullptr,10)&31u;
         else if (!strcmp(k, "gpu_keep_heavy")) g.gpu_keep_heavy = atoi(v) != 0;
-        else if (!strcmp(k, "fps")) { g.fps = 0; for (int j = 0; j < 6; j++) if (!strcmp(v, k_fps_ini[j])) g.fps = j; if (!strcmp(v, "unlímited") || !strcmp(v, "0")) g.fps = 5; }
+        else if (!strcmp(k, "fps")) g.fps = xcde_fps_parse(v);
+        else if (!strcmp(k, "fps_limiter")) g.fps_limiter = xcde_fps_limiter_parse(v);
         else if (!strcmp(k, "volume")) g.volume = atoi(v);
         else if (!strcmp(k, "audio_channels")) g.audio_channels = audio_out_parse(v);
         else if (!strcmp(k, "movie_audio")) g.movie_audio = atoi(v) != 0;
@@ -806,8 +807,10 @@ static bool save() {
     fprintf(f, "cheat_no_fall_damage = %d\n", g.cheats.cheat_no_fall_damage);
     fprintf(f, "cheat_high_jump = %d\n", g.cheats.cheat_high_jump);  // [XCDE] T276: jump height x8
     fprintf(f, "camera_follow_jump = %d\n", g.cheats.camera_follow_jump);  // [XCDE] T276: camera follows jumps
-    fprintf(f, "volume = %d\naudio_channels = %s\nmovie_audio = %d\nlanguage = %s\nfps = %s\n", g.volume,
-            audio_out_ini[audio_out_valid(g.audio_channels)], g.movie_audio, k_lang_ini[g.lang], k_fps_ini[g.fps]);
+    fprintf(f, "volume = %d\naudio_channels = %s\nmovie_audio = %d\nlanguage = %s\n", g.volume,
+            audio_out_ini[audio_out_valid(g.audio_channels)], g.movie_audio, k_lang_ini[g.lang]);
+    if (g.fps > 0) fprintf(f, "fps = %d\n", xcde_fps_clamp(g.fps)); else fprintf(f, "fps = unlimited\n");
+    fprintf(f, "fps_limiter = %s\n", xcde_fps_limiter_ini[xcde_fps_limiter_valid(g.fps_limiter)]);
     for (const Mod &m : g_mods) if (!is_icon_mod(m.name)) fprintf(f, "mod_%s = %d", m.name.c_str(), m.on), fputc(10, f);
     int ic = icons_effective(g.icons);
     fprintf(f, "button_icons = %s\nmod_%s = %d\nmod_%s = %d\nmod_icons_keyboard = %d\n", k_icon_ini[g.icons], k_icon_mod[0], ic == 2,
@@ -1679,23 +1682,21 @@ static Settings quality_settings() {
     Settings v{};
     static const int resolutions[]={RES_MATCH,1,RES_1_5,2,3,RES_Q75,RES_Q50,RES_DYNAMIC};
     static const int upscalers[]={UPSCALE_BILINEAR,UPSCALE_FSR1,UPSCALE_FSR3,UPSCALE_DLSS,UPSCALE_FSR4_LITE};
-    static const int fps[]={30,60,120,144,165,0};
     v.quality_preset=g.quality_preset; v.gpu_performance=g.gpu_performance;
     v.res_mode=resolutions[std::clamp(g.res,0,7)]; v.upscaler=upscalers[std::clamp(g.upscaler,0,4)];
     v.upscaler_auto=g.upscaler_auto; v.antialias=g.smaa ? AA_SMAA : AA_OFF;
     v.upscale_quality=g.uquality;
     v.dof_off=!g.dof; v.game_blur=g.game_blur; v.frame_gen=g.frame_gen;
     v.dynamic_min_height=g.dynamic_min_height; v.dynamic_max_height=g.dynamic_max_height;
-    v.effects_off=g.effects_off; v.fps=fps[std::clamp(g.fps,0,5)];
+    v.effects_off=g.effects_off; v.fps=xcde_fps_clamp(g.fps); v.fps_limiter=xcde_fps_limiter_valid(g.fps_limiter);
     v.cutscene_mode=g.cut_fg ? 2 : g.cutscenes ? 1 : 0; return v;
 }
 static void quality_from_settings(const Settings &v) {
     static const int resolutions[]={RES_MATCH,1,RES_1_5,2,3,RES_Q75,RES_Q50,RES_DYNAMIC};
     static const int upscalers[]={UPSCALE_BILINEAR,UPSCALE_FSR1,UPSCALE_FSR3,UPSCALE_DLSS,UPSCALE_FSR4_LITE};
-    static const int fps[]={30,60,120,144,165,0};
     for (int i=0;i<8;i++) if (resolutions[i]==v.res_mode) g.res=i;
     for (int i=0;i<5;i++) if (upscalers[i]==v.upscaler) g.upscaler=i;
-    for (int i=0;i<6;i++) if (fps[i]==v.fps) g.fps=i;
+    g.fps=xcde_fps_clamp(v.fps); g.fps_limiter=xcde_fps_limiter_valid(v.fps_limiter);
     g.quality_preset=v.quality_preset; g.gpu_performance=v.gpu_performance;
     g.upscaler_auto=v.upscaler_auto; g.smaa=v.antialias==AA_SMAA;
     g.uquality=v.upscale_quality;

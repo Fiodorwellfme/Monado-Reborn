@@ -52,6 +52,7 @@ run_test test_translate_xfb -std=gnu11 -w tests/native/test_translate_xfb.c runt
 run_test test_ui_scale -std=c11 -Wall -Wextra -Werror tests/native/test_ui_scale.c -lm
 run_test test_window_size -std=c11 -Wall -Wextra -Werror tests/native/test_window_size.c
 run_test test_audio_options -std=c11 -Wall -Wextra -Werror tests/native/test_audio_options.c -lm
+run_test test_fps_limiter -std=c11 -Wall -Wextra -Werror tests/native/test_fps_limiter.c
 # [XCDE] T277: GitHub #218 - a non-ASCII folder through the UTF-8 path wrappers (utf8_path.h).
 run_test test_utf8_paths -std=c11 -Wall -Wextra -Werror tests/native/test_utf8_paths.c
 # [XCDE] T282: the shader precompile signature (runtime/nvn/vulkan/precompile_sig.c). The build generates shader_sig.h;
