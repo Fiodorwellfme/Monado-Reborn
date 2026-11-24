@@ -272,7 +272,13 @@ static void overlay(Dir *dst, const char *path, int depth, int *replaced, int *a
     if (dst->ndirs) qsort(dst->dirs, dst->ndirs, sizeof *dst->dirs, by_name_dir);
     if (dst->nfiles) qsort(dst->files, dst->nfiles, sizeof *dst->files, by_name_file);
 }
-static int by_str(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static int by_mod_order(const void *a, const void *b) {
+    extern int settings_mod_priority(const char *name);
+    const char *sa = *(char *const *)a, *sb = *(char *const *)b;
+    int pa = settings_mod_priority(sa), pb = settings_mod_priority(sb);
+    if (pa != pb) return pa < pb ? -1 : 1;
+    return strcmp(sa, sb);
+}
 static void apply_mods(Dir *root) {
     if (getenv("XCDE_NO_MODS")) return;
     char mods_env[1100];
@@ -284,7 +290,7 @@ static void apply_mods(Dir *root) {
     XcdeDirent *e;
     while ((e = xcde_readdir(d)) && n < 256) if (e->d_name[0] != '.') names[n++] = strdup(e->d_name);
     xcde_closedir(d);
-    qsort(names, n, sizeof *names, by_str);
+    qsort(names, n, sizeof *names, by_mod_order);
     extern bool settings_mod_enabled(const char *name);
     for (int i = 0; i < n; i++) {
         char p[1024];

@@ -105,6 +105,19 @@ static KEvent *g_audio_dev_events[16];
 static int g_audio_dev_events_n;
 static pthread_mutex_t g_track_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static SDL_AudioDeviceID audio_pick_playback_device(void) {
+    if (!g_settings.audio_device[0]) return SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    int n = 0;
+    SDL_AudioDeviceID *ids = SDL_GetAudioPlaybackDevices(&n);
+    SDL_AudioDeviceID match = SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
+    for (int i = 0; ids && i < n; i++) {
+        const char *name = SDL_GetAudioDeviceName(ids[i]);
+        if (name && !strcmp(name, g_settings.audio_device)) { match = ids[i]; break; }
+    }
+    SDL_free(ids);
+    return match;
+}
+
 static int audio_host_channels(void) {
     int cached = atomic_load(&g_audio_host_ch);
     if (cached > 0) return cached;
@@ -115,7 +128,7 @@ static int audio_host_channels(void) {
     int ch = 2;
     if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         SDL_AudioSpec dev;
-        if (SDL_GetAudioDeviceFormat(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &dev, NULL) && dev.channels > 0)
+        if (SDL_GetAudioDeviceFormat(audio_pick_playback_device(), &dev, NULL) && dev.channels > 0)
             ch = dev.channels;
     }
     atomic_store(&g_audio_host_ch, ch);
@@ -663,11 +676,12 @@ static void render_frame(Renderer *r, float *stereo) {
     }
 }
 
-// Output gain: menu volume times LARECOMP_AUDIO_GAIN (applied live).
+// Output gain: menu volume times LARECOMP_AUDIO_GAIN (applied live); 0 while unfocused if mute_unfocused is set.
 static void apply_gain(SDL_AudioStream *st) {
+    extern bool xcde_window_focused(void);
     static double env = -1;
     if (env < 0) env = getenv("LARECOMP_AUDIO_GAIN") ? atof(getenv("LARECOMP_AUDIO_GAIN")) : 1.0;
-    float g = (float)(env * g_settings.volume);
+    float g = (g_settings.mute_unfocused && !xcde_window_focused()) ? 0.0f : (float)(env * g_settings.volume);
     if (st && SDL_GetAudioStreamGain(st) != g) SDL_SetAudioStreamGain(st, g);
 }
 
@@ -703,12 +717,16 @@ static void *renderer_tick(void *arg) {
         }
     }
     uint32_t seen_gen = atomic_load(&g_audio_dev_gen);
+    char seen_dev[128];
+    snprintf(seen_dev, sizeof seen_dev, "%s", g_settings.audio_device);
     while (!r->quit) {
         uint32_t cur_gen = atomic_load(&g_audio_dev_gen);
         if (cur_gen != seen_gen) {
             seen_gen = cur_gen;
             uint32_t want_ch = (uint32_t)audio_active_channels();
-            if (want_ch != ch) {
+            bool dev_changed = strcmp(seen_dev, g_settings.audio_device) != 0;
+            if (dev_changed) snprintf(seen_dev, sizeof seen_dev, "%s", g_settings.audio_device);
+            if (want_ch != ch || dev_changed) {
                 pthread_mutex_lock(&r->lock);
                 r->out_channels = want_ch;
                 pthread_mutex_unlock(&r->lock);
@@ -717,15 +735,26 @@ static void *renderer_tick(void *arg) {
                 target = 4 * frame_bytes;
                 if (r->stream) {
                     SDL_AudioSpec new_spec = {SDL_AUDIO_F32, (int)ch, (int)r->sample_rate};
-                    SDL_SetAudioStreamFormat(r->stream, &new_spec, NULL);
-                    SDL_AudioSpec dev;
-                    int dev_frames = 0;
-                    if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(r->stream), &dev, &dev_frames) && dev_frames > 0) {
-                        int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * (int)ch * (int)sizeof(float);
-                        if (t > target) target = t;
+                    if (dev_changed) {
+                        SDL_DestroyAudioStream(r->stream);
+                        r->stream = SDL_OpenAudioDeviceStream(audio_pick_playback_device(), &new_spec, NULL, NULL);
+                        if (r->stream) {
+                            apply_gain(r->stream);
+                            SDL_ResumeAudioStreamDevice(r->stream);
+                        }
+                    } else {
+                        SDL_SetAudioStreamFormat(r->stream, &new_spec, NULL);
+                    }
+                    if (r->stream) {
+                        SDL_AudioSpec dev;
+                        int dev_frames = 0;
+                        if (SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(r->stream), &dev, &dev_frames) && dev_frames > 0) {
+                            int t = (2 * dev_frames * (int)r->sample_rate / (dev.freq ? dev.freq : 48000) + (int)N) * (int)ch * (int)sizeof(float);
+                            if (t > target) target = t;
+                        }
                     }
                 }
-                LOG("[audren] hot-swapped output stream to %u ch\n", ch);
+                LOG("[audren] hot-swapped output stream to %u ch (%s)\n", ch, seen_dev[0] ? seen_dev : "default");
             }
         }
         if (r->stream) {
@@ -1034,7 +1063,7 @@ static void renderer_open_output(Renderer *r) {
     if (getenv("LARECOMP_NO_AUDIO") && strcmp(getenv("LARECOMP_NO_AUDIO"), "0")) return;
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) { LOG("[audren] SDL audio init failed: %s\n", SDL_GetError()); return; }
     SDL_AudioSpec spec = {SDL_AUDIO_F32, (int)ch, (int)r->sample_rate};
-    r->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+    r->stream = SDL_OpenAudioDeviceStream(audio_pick_playback_device(), &spec, NULL, NULL);
     if (!r->stream) { LOG("[audren] SDL audio open failed: %s\n", SDL_GetError()); return; }
     if (getenv("LARECOMP_AUDIO_GAIN")) SDL_SetAudioStreamGain(r->stream, (float)atof(getenv("LARECOMP_AUDIO_GAIN")));
     SDL_ResumeAudioStreamDevice(r->stream);
@@ -1289,19 +1318,33 @@ static void *audout_thread(void *arg) {
             seen_gen = cur_gen;
             uint32_t active_ch = (uint32_t)audio_active_channels();
             uint32_t want_out = (ch == 6 && active_ch == 2) ? 2 : ch;
-            if (want_out != out_ch) {
+            static char audout_seen_dev[128];
+            bool dev_changed = strcmp(audout_seen_dev, g_settings.audio_device) != 0;
+            if (dev_changed) snprintf(audout_seen_dev, sizeof audout_seen_dev, "%s", g_settings.audio_device);
+            if (want_out != out_ch || dev_changed) {
                 out_ch = want_out;
                 a->out_channels = out_ch;
                 if (a->stream) {
                     SDL_AudioSpec new_spec = {SDL_AUDIO_S16, (int)out_ch, (int)a->rate};
-                    SDL_SetAudioStreamFormat(a->stream, &new_spec, NULL);
-                    SDL_AudioSpec dev;
-                    int dev_frames = 0;
-                    if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(a->stream), &dev, &dev_frames) || dev_frames <= 0)
-                        dev_frames = 1024;
-                    target = 2 * dev_frames * 2 * (int)out_ch;
+                    if (dev_changed) {
+                        SDL_DestroyAudioStream(a->stream);
+                        a->stream = SDL_OpenAudioDeviceStream(audio_pick_playback_device(), &new_spec, NULL, NULL);
+                        if (a->stream) {
+                            apply_gain(a->stream);
+                            SDL_ResumeAudioStreamDevice(a->stream);
+                        }
+                    } else {
+                        SDL_SetAudioStreamFormat(a->stream, &new_spec, NULL);
+                    }
+                    if (a->stream) {
+                        SDL_AudioSpec dev;
+                        int dev_frames = 0;
+                        if (!SDL_GetAudioDeviceFormat(SDL_GetAudioStreamDevice(a->stream), &dev, &dev_frames) || dev_frames <= 0)
+                            dev_frames = 1024;
+                        target = 2 * dev_frames * 2 * (int)out_ch;
+                    }
                 }
-                LOG("[audout] hot-swapped output stream to %u ch\n", out_ch);
+                LOG("[audout] hot-swapped output stream to %u ch (%s)\n", out_ch, audout_seen_dev[0] ? audout_seen_dev : "default");
             }
         }
         pthread_mutex_lock(&a->lock);
@@ -1465,7 +1508,7 @@ SERVICE("audout:u", audout_u) {
         }
         if (!kernel_det() && !(getenv("LARECOMP_NO_AUDIO") && strcmp(getenv("LARECOMP_NO_AUDIO"), "0")) && SDL_InitSubSystem(SDL_INIT_AUDIO)) {
             SDL_AudioSpec spec = {SDL_AUDIO_S16, (int)a->out_channels, (int)a->rate};
-            a->stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
+            a->stream = SDL_OpenAudioDeviceStream(audio_pick_playback_device(), &spec, NULL, NULL);
             if (a->stream) {
                 if (getenv("LARECOMP_AUDIO_GAIN")) SDL_SetAudioStreamGain(a->stream, (float)atof(getenv("LARECOMP_AUDIO_GAIN")));
                 SDL_ResumeAudioStreamDevice(a->stream);
