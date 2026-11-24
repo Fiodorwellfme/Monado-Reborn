@@ -3131,6 +3131,26 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS *e) {
 }
 #endif
 
+#ifndef _WIN32
+// [XCDE] GitHub #232: resolve a scalable system font via fontconfig so Linux distros with non-Arch/Debian
+// font paths (e.g. Fedora, NixOS) don't fall back to ImGui's 13px bitmap ProggyClean font.
+static std::string fc_match_font(const char *pattern) {
+    std::string cmd = std::string("fc-match -f '%{file}' '") + pattern + "' 2>/dev/null";
+    FILE *p = popen(cmd.c_str(), "r");
+    if (!p) return {};
+    char buf[1024];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, p);
+    pclose(p);
+    buf[n] = '\0';
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' ')) buf[--n] = '\0';
+    if (n < 4) return {};
+    const char *ext = buf + n - 4;
+    if (strcasecmp(ext, ".ttf") != 0 && strcasecmp(ext, ".otf") != 0 && strcasecmp(ext, ".ttc") != 0) return {};
+    SDL_PathInfo pi;
+    return SDL_GetPathInfo(buf, &pi) ? std::string(buf) : std::string();
+}
+#endif
+
 // [XCDE] Launcher fonts: body 17 px and headings 34 px at the window's display scale, rasterized at the physical
 // pixel density (HiDPI/Wayland/macOS-style scaling) and drawn back at 1/density. Rebuilt when the window changes scale.
 static ImFont *g_heading_font;
@@ -3141,21 +3161,48 @@ static void launcher_fonts(ImGuiIO &io, float scale, float density) {
     static const char *body_files[] = {"C:\\Windows\\Fonts\\segoeui.ttf"};
     static const char *head_files[] = {"C:\\Windows\\Fonts\\seguisb.ttf", "C:\\Windows\\Fonts\\segoeui.ttf"};
 #else
+    static bool fc_checked = false;
+    static std::string fc_body, fc_head;
+    if (!fc_checked) {
+        fc_checked = true;
+        fc_body = fc_match_font("sans-serif:weight=regular");
+        fc_head = fc_match_font("sans-serif:weight=semibold");
+        if (fc_head.empty()) fc_head = fc_match_font("sans-serif:weight=bold");
+    }
     static const char *body_files[] = {"/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                                       "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf", "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+                                       "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
                                        "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                       "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"};
+                                       "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+                                       "/usr/share/fonts/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf"};
     static const char *head_files[] = {"/usr/share/fonts/noto/NotoSans-SemiBold.ttf", "/usr/share/fonts/truetype/noto/NotoSans-SemiBold.ttf",
                                        "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                                       "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf", "/usr/share/fonts/google-noto/NotoSans-SemiBold.ttf",
+                                       "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
                                        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                                       "/usr/share/fonts/liberation/LiberationSans-Bold.ttf"};
+                                       "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+                                       "/usr/share/fonts/liberation/LiberationSans-Bold.ttf", "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf"};
 #endif
     auto add = [&](const char *const *files, size_t n, float px) -> ImFont * {
-        for (size_t i = 0; i < n; i++) { SDL_PathInfo pi; if (SDL_GetPathInfo(files[i], &pi)) return io.Fonts->AddFontFromFileTTF(files[i], px, &cfg); }
+        for (size_t i = 0; i < n; i++) {
+            SDL_PathInfo pi;
+            if (SDL_GetPathInfo(files[i], &pi)) {
+                if (ImFont *f = io.Fonts->AddFontFromFileTTF(files[i], px, &cfg)) return f;
+            }
+        }
         return nullptr;
     };
-    ImFont *body = add(body_files, sizeof body_files / sizeof *body_files, 17.0f * scale * density);
+    ImFont *body = nullptr;
+#ifndef _WIN32
+    if (!fc_body.empty()) body = io.Fonts->AddFontFromFileTTF(fc_body.c_str(), 17.0f * scale * density, &cfg);
+#endif
+    if (!body) body = add(body_files, sizeof body_files / sizeof *body_files, 17.0f * scale * density);
     if (!body) { ImFontConfig d; d.SizePixels = 13.0f * scale * density; body = io.Fonts->AddFontDefault(&d); }
-    ImFont *head = add(head_files, sizeof head_files / sizeof *head_files, 34.0f * scale * density);
+    ImFont *head = nullptr;
+#ifndef _WIN32
+    if (!fc_head.empty()) head = io.Fonts->AddFontFromFileTTF(fc_head.c_str(), 34.0f * scale * density, &cfg);
+#endif
+    if (!head) head = add(head_files, sizeof head_files / sizeof *head_files, 34.0f * scale * density);
     g_heading_font = head ? head : body;
     io.FontGlobalScale = 1.0f / density;
 }
