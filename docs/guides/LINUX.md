@@ -33,7 +33,8 @@ The launcher alone: `tools/launcher/build_linux.sh`. Its reports are zipped with
 
 ## Differences from Windows
 
-- DLSS (NVIDIA Streamline) is Windows-only. FSR 3.1 and FSR 4 Lite are native Linux components (below).
+- DLSS is supported on NVIDIA RTX GPUs with Vulkan 1.3+ when the Linux NVIDIA NGX DLSS runtime is installed
+  (`setup_linux_dlss.py` / `libmonado_dlss.so`). FSR 3.1 and FSR 4 Lite are native Linux components (below).
   Everything else (FSR 1, SMAA, the F1 menu, mods, controls) is the same code.
 - Logs go to the terminal or wherever stderr is redirected (the launcher: `build/last_game.log`); started from a
   desktop without either, to `~/.local/share/monado/lasrecomp.log`. Runtime log lines start with their local wall-clock time

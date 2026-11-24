@@ -222,10 +222,21 @@ static const char *host_sym(uint64_t pc, uint64_t *offset) {
     const char *s = rt_host_fn_name(pc, offset);
     return s ? s : plat_symbol(pc, offset);
 }
-// (kernel.c thread dumps: the PDB names first, so runtime code past the last game function is not called f_<last>)
+// (kernel.c thread dumps: the PDB names first, so runtime code past the last game function is not called f_<last>;
+// when plat_symbol only returns the module name for lasgame.dll/.so, resolve the exact guest f_<addr> from byhost)
 const char *rt_host_sym(uint64_t pc, uint64_t *offset) {
-    const char *s = plat_symbol(pc, offset);
-    return s ? s : rt_host_fn_name(pc, offset);
+    uint64_t sym_off = 0;
+    const char *s = plat_symbol(pc, &sym_off);
+    if (!s || !strcmp(s, "lasgame.dll") || !strcmp(s, "lasgame.so")) {
+        uint64_t fn_off = 0;
+        const char *g = rt_host_fn_name(pc, &fn_off);
+        if (g) {
+            if (offset) *offset = fn_off;
+            return g;
+        }
+    }
+    if (offset) *offset = sym_off;
+    return s;
 }
 
 void rt_fatal_trace(void) {

@@ -1639,6 +1639,31 @@ void backend_present(NvnTexture *t) {
         // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
         if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
     }
+    {   // [XCDE] user screenshot hotkey (default F12 -> screenshots/xcde_YYYYMMDD_HHMMSS.png)
+        extern bool vk_consume_user_screenshot(void);
+        if (vk_consume_user_screenshot()) {
+            extern void menu_toast(const char *msg);
+            mkdir("screenshots", 0755);
+            time_t now_t = time(NULL);
+            struct tm tm_buf;
+#ifdef _WIN32
+            localtime_s(&tm_buf, &now_t);
+#else
+            localtime_r(&now_t, &tm_buf);
+#endif
+            static time_t last_sec;
+            static int seq;
+            if (now_t == last_sec) seq++; else { last_sec = now_t; seq = 0; }
+            char path[256], stamp[32];
+            strftime(stamp, sizeof stamp, "%Y%m%d_%H%M%S", &tm_buf);
+            if (seq) snprintf(path, sizeof path, "screenshots/xcde_%s_%d.png", stamp, seq);
+            else snprintf(path, sizeof path, "screenshots/xcde_%s.png", stamp);
+            renderer_save_texture_tex(b, path);
+            char note[300];
+            snprintf(note, sizeof note, g_settings.ui_lang ? "Screenshot saved: %s" : "Captura guardada: %s", path);
+            menu_toast(note);
+        }
+    }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
     if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
@@ -1706,6 +1731,45 @@ static void quick_exit_handler(void) {
 #endif
 }
 
+// [XCDE] Pick the native 1:1 physical-pixel fullscreen display mode (avoiding scaled logical modes from
+// SDL_GetDesktopDisplayMode on HiDPI / Wayland fractional scaling, which would make exclusive fullscreen blurry).
+const SDL_DisplayMode *xcde_pick_exclusive_mode(SDL_Window *win, SDL_DisplayMode *out) {
+    if (!win || !out) return NULL;
+    SDL_DisplayID did = SDL_GetDisplayForWindow(win);
+    if (!did) return NULL;
+    const SDL_DisplayMode *desk = SDL_GetDesktopDisplayMode(did);
+    int n = 0;
+    SDL_DisplayMode **modes = SDL_GetFullscreenDisplayModes(did, &n);
+    const SDL_DisplayMode *best = NULL;
+    int64_t best_area = -1;
+    bool best_1x = false;
+    float best_hz = -1.0f;
+    for (int i = 0; modes && i < n; i++) {
+        const SDL_DisplayMode *m = modes[i];
+        if (!m) continue;
+        float pd = m->pixel_density > 0.0f ? m->pixel_density : 1.0f;
+        int64_t pw = (int64_t)llroundf(m->w * pd);
+        int64_t ph = (int64_t)llroundf(m->h * pd);
+        int64_t area = pw * ph;
+        bool is_1x = fabsf(pd - 1.0f) < 0.01f;
+        bool better = false;
+        if (area > best_area) better = true;
+        else if (area == best_area && is_1x != best_1x) better = is_1x;
+        else if (area == best_area && is_1x == best_1x && m->refresh_rate > best_hz) better = true;
+        if (better) { best = m; best_area = area; best_1x = is_1x; best_hz = m->refresh_rate; }
+    }
+    if (best) {
+        *out = *best;
+        SDL_free(modes);
+        LOG("[window] exclusive fullscreen mode: %dx%d (density %.2f) @ %.2f Hz\n",
+            out->w, out->h, out->pixel_density, out->refresh_rate);
+        return out;
+    }
+    SDL_free(modes);
+    if (desk) { *out = *desk; return out; }
+    return NULL;
+}
+
 void ui_window_init(void) {
     if (window) return;
     atexit(quick_exit_handler);
@@ -1726,6 +1790,19 @@ void ui_window_init(void) {
     window = SDL_CreateWindow("Xenoblade Chronicles: Definitive Edition (Recomp)", win_w, win_h, wflags);
     if (!window) FATAL("SDL_CreateWindow: %s\n", SDL_GetError());
     rt_window_icon(window);
+    // [XCDE] preferred monitor placement
+    if (g_settings.display_index >= 0 && !getenv("LARECOMP_HIDDEN")) {
+        int ndisp = 0;
+        SDL_DisplayID *disps = SDL_GetDisplays(&ndisp);
+        if (disps && g_settings.display_index < ndisp) {
+            SDL_Rect r;
+            if (SDL_GetDisplayBounds(disps[g_settings.display_index], &r)) {
+                int x = r.x + (r.w - win_w) / 2, y = r.y + (r.h - win_h) / 2;
+                SDL_SetWindowPosition(window, x, y);
+            }
+        }
+        SDL_free(disps);
+    }
     // the Fullscreen setting applies from the start screen on (not only once the game runs); test windows stay windows
     // [XCDE] Steam Deck Game Mode (gamescope): a window there is only ever scaled to fit the screen, so the default
     // 1280x720 one showed as 16:9 with bars on the Deck's 16:10 panel. Under gamescope the game always goes fullscreen
@@ -1747,6 +1824,12 @@ void ui_window_init(void) {
     if ((g_settings.fullscreen || forced_fs) && !getenv("LARECOMP_WINDOW") && !getenv("LARECOMP_HIDDEN")) {
         if (gamescope_fs && !g_settings.fullscreen) LOG("[window] gamescope session: fullscreen\n");
         if (bigpicture_fs && !g_settings.fullscreen) LOG("[window] RecompLauncher Big Picture: fullscreen\n");
+        if (g_settings.fullscreen_mode == FULLSCREEN_EXCLUSIVE) {
+            SDL_DisplayMode dm;
+            SDL_SetWindowFullscreenMode(window, xcde_pick_exclusive_mode(window, &dm));
+        } else {
+            SDL_SetWindowFullscreenMode(window, NULL);
+        }
         SDL_SetWindowFullscreen(window, true);
     }
     {   // [XCDE] DLSS: Streamline must be loaded before the Vulkan instance (dlss.cpp)
@@ -1803,6 +1886,13 @@ void backend_clear_window(void) {
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
+static _Atomic bool g_win_focused = true;
+bool xcde_window_focused(void) { return atomic_load(&g_win_focused); }
+
+static _Atomic bool g_user_shot_req;
+void vk_request_user_screenshot(void) { atomic_store(&g_user_shot_req, true); }
+bool vk_consume_user_screenshot(void) { return atomic_exchange(&g_user_shot_req, false); }
+
 int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
@@ -1813,6 +1903,8 @@ int ui_run(void) {
                 LOG("window closed\n");
                 exit(0);
             }
+            if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) atomic_store(&g_win_focused, true);
+            else if (e.type == SDL_EVENT_WINDOW_FOCUS_LOST) atomic_store(&g_win_focused, false);
             if (e.type == SDL_EVENT_AUDIO_DEVICE_ADDED || e.type == SDL_EVENT_AUDIO_DEVICE_REMOVED ||
                 e.type == SDL_EVENT_AUDIO_DEVICE_FORMAT_CHANGED) {
                 extern void audio_notify_device_change(void);  // [XCDE] live 5.1/stereo hot-swap (runtime/services/audio.c)

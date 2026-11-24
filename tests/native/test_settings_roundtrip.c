@@ -84,9 +84,9 @@ int main(int argc, char **argv) {
     g_settings.cheat_high_jump = false; g_settings.camera_follow_jump = false; settings_load();
     assert(g_settings.fps_overlay_style == FPS_OVERLAY_SIMPLE);  // [XCDE] GitHub #39
     assert(g_settings.gpu_uuid[0] && g_settings.gpu_index == 1 && g_settings.stick_deadzone == 0);
-    assert(g_settings.grass_lod == GRASS_ULTRA);  // [XCDE] GitHub #171: legacy extreme migrates and round-trips as ultra
+    assert(g_settings.grass_lod == GRASS_LOW);  // [XCDE] Potato sets Low grass
     assert(g_settings.vulkan_api == 12 && !g_settings.fps_overlay && !g_settings.upscaler_auto);
-    assert(g_settings.quality_preset==QUALITY_POTATO && g_settings.gpu_performance);
+    assert(g_settings.quality_preset==QUALITY_POTATO && g_settings.gpu_performance && g_settings.taa_off);
     assert(g_settings.dynamic_min_height==360 && g_settings.dynamic_max_height==540);
     // [XCDE] Monado II cheats round-trip through the file, with the out-of-range multiplier written as 1x
     assert(g_settings.cheat_damage_dealt && g_settings.cheat_damage_dealt_percent == 250);
@@ -95,8 +95,17 @@ int main(int argc, char **argv) {
     assert(g_settings.cheat_high_jump);  // [XCDE] T276 round-trips through cheat_high_jump
     assert(g_settings.camera_follow_jump);  // [XCDE] T276 round-trips through camera_follow_jump
     // [XCDE] the old effect checkbox mask folds into the graphics choices at load (graphics_options.h)
-    // (GFX_AO is 1 from the effects_off = 1 written above: #130's AO migration, now part of the general fold)
     assert(!g_settings.effects_off && g_settings.graphics.value[GFX_REFLECTIONS]==1 && g_settings.graphics.value[GFX_AO]==1);
+    // [XCDE] Quality & Handheld presets round-trip cleanly
+    xcde_quality_apply(&g_settings, QUALITY_QUALITY); settings_save();
+    xcde_quality_apply(&g_settings, QUALITY_BALANCED); settings_load();
+    assert(g_settings.quality_preset == QUALITY_QUALITY && !g_settings.gpu_performance);
+    assert(g_settings.grass_lod == GRASS_ULTRA && g_settings.antialias == AA_OFF && g_settings.upscale_quality == UQ_NATIVE);
+    assert(g_settings.graphics.value[GFX_SHADOW_MAPS] == 1 && g_settings.graphics.value[GFX_PROP_LOD] == 3 && g_settings.graphics.value[GFX_FILTERING] == 4);
+    xcde_quality_apply(&g_settings, QUALITY_HANDHELD); settings_save();
+    xcde_quality_apply(&g_settings, QUALITY_BALANCED); settings_load();
+    assert(g_settings.quality_preset == QUALITY_HANDHELD && g_settings.gpu_performance);
+    assert(g_settings.upscaler == UPSCALE_FSR3 && g_settings.grass_lod == GRASS_ORIGINAL && g_settings.graphics.value[GFX_FILTERING] == 3);
     char data[8192] = {0}; f = fopen(argv[1], "r"); assert(f);
     assert(fread(data, 1, sizeof data - 1, f)); fclose(f);
     assert(strstr(data, "future_plugin = preserve this"));
@@ -131,5 +140,41 @@ int main(int argc, char **argv) {
     assert(g_settings.fps == 40 && g_settings.fps_limiter == FPS_LIMITER_DEFAULT);
     g_settings.fps = 0; settings_save(); g_settings.fps = 30; settings_load();
     assert(g_settings.fps == 0);
+    // [XCDE] QoL settings round-trip: focus mute, bg FPS, display/fullscreen mode, audio device, hotkeys, mod_order
+    g_settings.fullscreen_mode = FULLSCREEN_EXCLUSIVE;
+    g_settings.display_index = 2;
+    snprintf(g_settings.audio_device, sizeof g_settings.audio_device, "%s", "HDMI 5.1 AVR");
+    g_settings.mute_unfocused = true;
+    g_settings.bg_fps = 15;
+    g_settings.hotkey_menu = XCDE_KEY_INSERT;
+    g_settings.menu_pad_combo = false;
+    g_settings.hotkey_party = XCDE_KEY_F3;
+    g_settings.hotkey_screenshot = XCDE_KEY_PRINTSCREEN;
+    g_settings.hotkey_hud = XCDE_KEY_NONE;
+    settings_save();
+    g_settings.fullscreen_mode = FULLSCREEN_BORDERLESS;
+    g_settings.display_index = -1;
+    g_settings.audio_device[0] = 0;
+    g_settings.mute_unfocused = false;
+    g_settings.bg_fps = 0;
+    g_settings.hotkey_menu = XCDE_KEY_F1;
+    g_settings.menu_pad_combo = true;
+    g_settings.hotkey_party = XCDE_KEY_F2;
+    g_settings.hotkey_screenshot = XCDE_KEY_F12;
+    g_settings.hotkey_hud = XCDE_KEY_F4;
+    settings_load();
+    assert(g_settings.fullscreen_mode == FULLSCREEN_EXCLUSIVE && g_settings.display_index == 2);
+    assert(!strcmp(g_settings.audio_device, "HDMI 5.1 AVR"));
+    assert(g_settings.mute_unfocused && g_settings.bg_fps == 15);
+    assert(g_settings.hotkey_menu == XCDE_KEY_INSERT && !g_settings.menu_pad_combo);
+    assert(g_settings.hotkey_party == XCDE_KEY_F3 && g_settings.hotkey_screenshot == XCDE_KEY_PRINTSCREEN);
+    assert(g_settings.hotkey_hud == XCDE_KEY_NONE);
+    {
+        FILE *mf = fopen(argv[1], "a"); assert(mf);
+        fputs("mod_order = mod_z, mod_a\n", mf); fclose(mf);
+        settings_load();
+        assert(settings_mod_priority("mod_z") == 0 && settings_mod_priority("mod_a") == 1);
+        assert(settings_mod_priority("unlisted") > settings_mod_priority("mod_a"));
+    }
     assert(!remove(argv[1])); puts("settings round-trip: stable GPU ID, policies, 1.5x, window size, unknown keys and default reset OK"); return 0;
 }

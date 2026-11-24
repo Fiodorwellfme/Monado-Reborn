@@ -1141,12 +1141,32 @@ void kernel_dump_threads(FILE *out) {
                 svc_ns ? (unsigned long long)((now - svc_ns) / 1000000) : 0ull);
         // [XCDE] T122: a thread running with no SVC for over a second: where its host thread is (spin loops)
         if (!t->finished && t->wait_kind == WAIT_NONE && !t->in_sync_wait && svc_ns && now - svc_ns > 1000000000ull) {
+            uint64_t gpc = __atomic_load_n(&t->cpu.pc, __ATOMIC_RELAXED);
+            uint64_t glr = __atomic_load_n(&t->cpu.x[30], __ATOMIC_RELAXED);
+            uint64_t gsp = __atomic_load_n(&t->cpu.sp, __ATOMIC_RELAXED);
+            uint64_t glr_off = 0;
+            const char *glr_sym = glr ? loader_symbol_at(glr, &glr_off) : NULL;
+            fprintf(out, "[wd]   guest pc=%llx lr=%llx%s%s sp=%llx\n",
+                    (unsigned long long)gpc, (unsigned long long)glr,
+                    glr_sym ? " in " : "", glr_sym ? glr_sym : "",
+                    (unsigned long long)gsp);
             uint64_t pcs[32];
             int n = plat_thread_backtrace(&t->host, pcs, 32);
             for (int k = 0; k < n; k++) {
                 uint64_t off = 0;
                 const char *s = kernel_sym_hook ? kernel_sym_hook(pcs[k], &off) : NULL;
-                fprintf(out, "[wd]   #%d %llx %s+%llx\n", k, (unsigned long long)pcs[k], s ? s : "?", (unsigned long long)off);
+                const char *gsym = NULL;
+                if (s && s[0] == 'f' && s[1] == '_') {
+                    char *end = NULL;
+                    uint64_t gaddr = strtoull(s + 2, &end, 16);
+                    if (end && *end == '\0' && gaddr) {
+                        uint64_t goff = 0;
+                        gsym = loader_symbol_at(gaddr, &goff);
+                    }
+                }
+                fprintf(out, "[wd]   #%d %llx %s+%llx%s%s%s\n", k, (unsigned long long)pcs[k],
+                        s ? s : "?", (unsigned long long)off,
+                        gsym ? " (" : "", gsym ? gsym : "", gsym ? ")" : "");
             }
         }
         if (t->wait_kind == WAIT_MUTEX && mval) {

@@ -26,7 +26,9 @@ extern "C" {
 #include "../graphics_options.h"
 #include "../ui_scale.h"  // [XCDE] GitHub #121
 #include "../cheats_options.h"
+#include "../input_bind.h"
 #include "menu.h"
+extern bool g_party_switch;
 bool vk_imgui_backend_init(void);
 void input_reset(void);
 void vk_request_swapchain_recreate(void);
@@ -36,6 +38,7 @@ bool diag_deterministic(void);
 bool tmp_jitter_active(void);  // a temporal upscaler is selected: the game's TAA is off (runtime/hle/graphics.c)
 void plat_terminate(void);  // [XCDE] GitHub #22: the F1 menu's "exit the game" button (the platform's immediate exit)
 void audio_notify_device_change(void);  // [XCDE] live 5.1/stereo hot-swap (runtime/services/audio.c)
+const SDL_DisplayMode *xcde_pick_exclusive_mode(SDL_Window *win, SDL_DisplayMode *out);
 // [XCDE] GitHub #39: what the performance overlay (perf_overlay.h) reads
 int xcde_present_fps(void);
 float vk_display_hz_cached(void);
@@ -51,8 +54,21 @@ static std::mutex q_lock;
 struct QueuedEvent { SDL_Event e; char text[64]; };
 static QueuedEvent q[256];
 static int q_n;
-static volatile bool open_, want_window, want_size, want_text_input;
+static volatile bool open_, want_window, want_size, want_display, want_text_input;
 static bool fs_applied = false, fs_init, text_input_on = false;
+static int fs_mode_applied = FULLSCREEN_BORDERLESS;
+
+static std::mutex toast_lock;
+static char toast_msg[320];
+static uint64_t toast_until_ns;
+static const uint64_t TOAST_DUR_NS = 2800000000ull, TOAST_FADE_NS = 600000000ull;
+
+extern "C" void menu_toast(const char *msg) {
+    if (!msg || !*msg) return;
+    std::lock_guard<std::mutex> g(toast_lock);
+    snprintf(toast_msg, sizeof toast_msg, "%s", msg);
+    toast_until_ns = SDL_GetTicksNS() + TOAST_DUR_NS;
+}
 
 static bool is_input(Uint32 t) {
     switch (t) {
@@ -65,9 +81,10 @@ static bool is_input(Uint32 t) {
 }
 
 extern "C" bool menu_handle_event(const SDL_Event *e) {
+    int mk = g_settings.hotkey_menu > 0 ? g_settings.hotkey_menu : XCDE_KEY_F1;
     if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat &&
-        (e->key.scancode == SDL_SCANCODE_F1 || (open_ && e->key.scancode == SDL_SCANCODE_ESCAPE))) {
-        open_ = !open_ && e->key.scancode == SDL_SCANCODE_F1;
+        ((int)e->key.scancode == mk || (open_ && e->key.scancode == SDL_SCANCODE_ESCAPE))) {
+        open_ = !open_ && (int)e->key.scancode == mk;
         input_reset();  // (keys held when the menu opened / closed are released for the game)
         return true;
     }
@@ -86,18 +103,56 @@ extern "C" bool menu_handle_event(const SDL_Event *e) {
 extern "C" bool menu_is_open(void) { return open_; }
 
 extern "C" void menu_apply_window_requests(void *sdl_window) {
-    if (!fs_init) { fs_init = true; fs_applied = g_settings.fullscreen; }
+    if (!fs_init) { fs_init = true; fs_applied = g_settings.fullscreen; fs_mode_applied = g_settings.fullscreen_mode; }
     if (!sdl_window) return;
+    SDL_Window *win = (SDL_Window *)sdl_window;
+    if (want_display) {
+        want_display = false;
+        if (g_settings.display_index >= 0) {
+            int ndisp = 0;
+            SDL_DisplayID *disps = SDL_GetDisplays(&ndisp);
+            if (disps && g_settings.display_index < ndisp) {
+                SDL_Rect r;
+                if (SDL_GetDisplayBounds(disps[g_settings.display_index], &r)) {
+                    bool was_fs = (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0;
+                    if (was_fs) SDL_SetWindowFullscreen(win, false);
+                    int ww = g_window_w, wh = g_window_h;
+                    SDL_GetWindowSize(win, &ww, &wh);
+                    SDL_SetWindowPosition(win, r.x + (r.w - ww) / 2, r.y + (r.h - wh) / 2);
+                    if (was_fs) want_window = true;
+                }
+            }
+            SDL_free(disps);
+        }
+    }
     if (want_window) {
         want_window = false;
-        if (fs_applied != g_settings.fullscreen) {
-            SDL_SetWindowFullscreen((SDL_Window *)sdl_window, g_settings.fullscreen);
-            fs_applied = g_settings.fullscreen;
+        bool mode_changed = fs_applied && g_settings.fullscreen && fs_mode_applied != g_settings.fullscreen_mode;
+        if (g_settings.fullscreen) {
+            if (mode_changed) {
+                // Tear down the previous fullscreen mode cleanly (Wayland/X11 keep stale viewport/mouse scale otherwise).
+                SDL_SetWindowFullscreen(win, false);
+                SDL_SyncWindow(win);
+            }
+            if (g_settings.fullscreen_mode == FULLSCREEN_EXCLUSIVE) {
+                SDL_DisplayMode dm;
+                SDL_SetWindowFullscreenMode(win, xcde_pick_exclusive_mode(win, &dm));
+            } else {
+                SDL_SetWindowFullscreenMode(win, NULL);
+            }
+            SDL_SetWindowFullscreen(win, true);
+            SDL_SyncWindow(win);
+            vk_request_swapchain_recreate();
+        } else {
+            SDL_SetWindowFullscreen(win, false);
+            SDL_SyncWindow(win);
+            vk_request_swapchain_recreate();
         }
+        fs_applied = g_settings.fullscreen;
+        fs_mode_applied = g_settings.fullscreen_mode;
     }
     // [XCDE] a size chosen while fullscreen waits for the window: fullscreen covers the display, not this size.
     if (want_size) {
-        SDL_Window *win = (SDL_Window *)sdl_window;
         Uint32 flags = SDL_GetWindowFlags(win);
         if (!(flags & SDL_WINDOW_FULLSCREEN)) {
             want_size = false;
@@ -107,7 +162,6 @@ extern "C" void menu_apply_window_requests(void *sdl_window) {
     }
     bool need_text = open_ && want_text_input;
     if (need_text != text_input_on) {
-        SDL_Window *win = (SDL_Window *)sdl_window;
         if (need_text) SDL_StartTextInput(win);
         else SDL_StopTextInput(win);
         text_input_on = need_text;
@@ -173,15 +227,18 @@ static void feed(ImGuiIO &io, uint32_t w, uint32_t h) {
     for (int i = 0; i < n; i++) {
         const SDL_Event &e = ev[i].e;
         float sx = 1, sy = 1;
-        SDL_Window *win = SDL_GetWindowFromID(e.motion.windowID);
+        SDL_Window *win = nullptr;
+        if (e.type == SDL_EVENT_MOUSE_MOTION) win = SDL_GetWindowFromID(e.motion.windowID);
+        else if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) win = SDL_GetWindowFromID(e.button.windowID);
         if (win) {
-            int ww, wh;
+            int ww = 0, wh = 0;
             SDL_GetWindowSize(win, &ww, &wh);
             if (ww > 0 && wh > 0) { sx = (float)w / ww; sy = (float)h / wh; }
         }
         switch (e.type) {
         case SDL_EVENT_MOUSE_MOTION: io.AddMousePosEvent(e.motion.x * sx, e.motion.y * sy); break;
         case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP: {
+            io.AddMousePosEvent(e.button.x * sx, e.button.y * sy);
             int b = e.button.button == SDL_BUTTON_LEFT ? 0 : e.button.button == SDL_BUTTON_RIGHT ? 1 : 2;
             io.AddMousePosEvent(e.button.x * sx, e.button.y * sy);
             io.AddMouseButtonEvent(b, e.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
@@ -197,7 +254,7 @@ static void feed(ImGuiIO &io, uint32_t w, uint32_t h) {
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
             ImGuiKey k = pad_key(e.gbutton.button);
             if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
-            if (e.gbutton.button == SDL_GAMEPAD_BUTTON_EAST && e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) open_ = false;  // (B: back to the game)
+            if (e.gbutton.button == SDL_GAMEPAD_BUTTON_EAST && e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) { open_ = false; input_reset(); }  // (B: back to the game)
             break;
         }
         default: break;
@@ -270,9 +327,25 @@ static const char *const k_res_ui[] = {"Igual que la ventana (recomendado)", "1x
                                        "Dinámica (según objetivo FPS)"};
 static const int k_res_mode[] = {RES_MATCH, 1, RES_1_5, 2, 3, RES_Q75, RES_Q50, RES_DYNAMIC};
 
+static void hotkey_combo(const char *label, int *scancode, int fallback, bool allow_none, bool en) {
+    const char *cur = xcde_hotkey_label(*scancode, fallback, en);
+    if (monado_begin_combo(label, cur)) {
+        for (int i = allow_none ? 0 : 1; i < XCDE_HOTKEY_COUNT; i++) {
+            const char *txt = i == 0 ? (en ? "None" : "Ninguna") : xcde_hotkey_choices[i].label;
+            bool sel = (*scancode == xcde_hotkey_choices[i].scancode);
+            if (ImGui::Selectable(txt, sel)) *scancode = xcde_hotkey_choices[i].scancode;
+            if (sel) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+}
+
 static void ui(void) {
-    static bool saved_note;
+    static bool saved_note, dirty;
     Settings opening=g_settings, quality_before=g_settings;
+    bool open_party = g_party_switch;
+    int open_w = g_window_w, open_h = g_window_h, open_ml = g_mouse_look, open_ms = g_mouse_sens;
+    bool open_mi = g_mouse_invert;
     ImGuiViewport *vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(vp->Size.x * 0.5f, vp->Size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     // [XCDE] the font and spacing grow with the output height (font_h: 22 px per 1080 lines), so the window does too:
@@ -286,10 +359,53 @@ static void ui(void) {
                       ImGuiWindowFlags_AlwaysVerticalScrollbar);  // (short windows: every option reachable)
     if (ImGui::BeginTabBar("tabs")) {
         if (ImGui::BeginTabItem(T("Gráficos"))) {
-            monado_quality_controls(&g_settings,g_settings.ui_lang!=0);
+            const bool en = g_settings.ui_lang != 0;
+            if (monado_quality_controls(&g_settings,en)) {
+                if (g_settings.upscaler_auto && dlss_available()) g_settings.upscaler = UPSCALE_DLSS;
+                xcde_graphics_publish(&g_settings.graphics);
+                xcde_foliage_set_preset(g_settings.grass_lod);
+            }
             quality_before=g_settings;
             ImGui::SeparatorText(T("Pantalla"));
             if (ImGui::Checkbox(T("Pantalla completa"), &g_settings.fullscreen)) want_window = true;
+            {
+                const char *fs_modes[] = {en ? "Borderless (desktop)" : "Sin bordes (escritorio)",
+                                          en ? "Exclusive fullscreen" : "Pantalla completa exclusiva"};
+                int fm = g_settings.fullscreen_mode == FULLSCREEN_EXCLUSIVE ? 1 : 0;
+                if (monado_combo(en ? "Fullscreen mode" : "Modo pantalla completa", &fm, fs_modes, 2)) {
+                    g_settings.fullscreen_mode = fm ? FULLSCREEN_EXCLUSIVE : FULLSCREEN_BORDERLESS;
+                    if (g_settings.fullscreen) want_window = true;
+                }
+                ImGui::SetItemTooltip("%s", en
+                    ? "Borderless: instant Alt+Tab, uses desktop mode.\nExclusive: dedicated display mode (switches live when fullscreen)."
+                    : "Sin bordes: Alt+Tab instantáneo, usa el modo del escritorio.\nExclusiva: modo dedicado de pantalla (cambia al instante en pantalla completa).");
+            }
+            {   // [XCDE] Monitor / display picker
+                int ndisp = 0;
+                SDL_DisplayID *disps = SDL_GetDisplays(&ndisp);
+                char dpreview[128];
+                if (g_settings.display_index < 0 || !disps || g_settings.display_index >= ndisp) {
+                    snprintf(dpreview, sizeof dpreview, "%s", en ? "Automatic (current display)" : "Automático (pantalla actual)");
+                } else {
+                    const char *dn = SDL_GetDisplayName(disps[g_settings.display_index]);
+                    snprintf(dpreview, sizeof dpreview, "%d: %s", g_settings.display_index + 1, dn ? dn : "Display");
+                }
+                if (monado_begin_combo(en ? "Display / Monitor" : "Monitor / Pantalla", dpreview)) {
+                    if (ImGui::Selectable(en ? "Automatic (current display)" : "Automático (pantalla actual)", g_settings.display_index < 0))
+                        g_settings.display_index = -1;
+                    for (int i = 0; disps && i < ndisp && i < 16; i++) {
+                        const char *dn = SDL_GetDisplayName(disps[i]);
+                        char item[144];
+                        snprintf(item, sizeof item, "%d: %s", i + 1, dn ? dn : "Display");
+                        if (ImGui::Selectable(item, g_settings.display_index == i)) {
+                            g_settings.display_index = i;
+                            want_display = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                SDL_free(disps);
+            }
             {   // [XCDE] same window size presets as the launcher, applied to the window at once
                 int wi = xcde_window_size_index(g_window_w, g_window_h);
                 char current[48];
@@ -323,6 +439,7 @@ static void ui(void) {
                 ImGui::SetItemTooltip("%s", g_settings.ui_lang
                     ? "Shrinks the field and battle HUD towards its corners (minimap, party, arts palette, hints).\nMenus keep the game's own size. Applies at once."
                     : "Reduce el HUD de exploración y combate hacia sus esquinas (minimapa, grupo, paleta de artes, ayudas).\nLos menús mantienen el tamaño del juego. Se aplica al instante.");
+                ImGui::Checkbox(en ? "Hide field HUD (screenshot mode)" : "Ocultar HUD de exploración (modo captura)", &g_settings.hide_hud);
             }
             ImGui::SeparatorText(T("Resolución y escalado"));
             int ri = 0;
@@ -342,7 +459,10 @@ static void ui(void) {
             for (int i = 0; i < nups; i++) if (upv[i] == g_settings.upscaler) ui_ = i;
             const char *preview = g_settings.upscaler_auto ? (g_settings.ui_lang ? "Automatic (DLSS on supported RTX)" : "Automático (DLSS en RTX compatible)") : T(ups[ui_]);
             if (monado_begin_combo(T("Escalado / antialiasing"), preview)) {
-                if (ImGui::Selectable(g_settings.ui_lang ? "Automatic (restart)" : "Automático (reiniciar)", g_settings.upscaler_auto)) g_settings.upscaler_auto = true;
+                if (ImGui::Selectable(g_settings.ui_lang ? "Automatic (restart)" : "Automático (reiniciar)", g_settings.upscaler_auto)) {
+                    g_settings.upscaler_auto = true;
+                    if (dlss_available()) g_settings.upscaler = UPSCALE_DLSS;
+                }
                 for (int i = 0; i < nups; ++i) {
                     bool unavailable = i == 3 && !dlss_available();
                     ImGui::BeginDisabled(unavailable);
@@ -352,7 +472,7 @@ static void ui(void) {
                 }
                 ImGui::EndCombo();
             }
-            if (g_settings.upscaler == UPSCALE_FSR1 || g_settings.upscaler == UPSCALE_FSR3) {  // [XCDE] RCAS strength, live
+            if (g_settings.upscaler == UPSCALE_FSR1 || g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_FSR4_LITE) {  // [XCDE] RCAS strength, live
                 float sharp = xcde_sharpness(&g_settings);
                 if (ImGui::SliderFloat(g_settings.ui_lang ? "Sharpening (RCAS)" : "Nitidez (RCAS)", &sharp, 0.0f, 1.0f, "%.2f"))
                     g_settings.upscale_sharpness = sharp;
@@ -362,7 +482,7 @@ static void ui(void) {
                     if (ImGui::SmallButton(g_settings.ui_lang ? "Default" : "Predeterminada")) g_settings.upscale_sharpness = -1.0f;
                 }
             }
-            if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DLSS || g_settings.upscaler == UPSCALE_FSR4_LITE) {
+            if (g_settings.upscaler == UPSCALE_FSR3 || g_settings.upscaler == UPSCALE_DLSS || g_settings.upscaler == UPSCALE_FSR4_LITE || (g_settings.upscaler_auto && dlss_available())) {
                 static const char *uq[] = {"Nativo (solo antialiasing)", "Calidad (67 %)", "Equilibrado (59 %)", "Rendimiento (50 %)",
                                            "Ultra rendimiento (33 %)"};
                 monado_combo(T("Calidad del escalado"), &g_settings.upscale_quality, TL(uq, 5).p, 5);
@@ -371,7 +491,6 @@ static void ui(void) {
                 ImGui::EndDisabled();
             }
             // [XCDE] One place per option, grouped as in the launcher: anti-aliasing, shadows, detail, effects, indicators.
-            const bool en = g_settings.ui_lang != 0;
             ImGui::SeparatorText("Antialiasing");
             bool smaa = g_settings.antialias == AA_SMAA;
             if (ImGui::Checkbox(T("Antialiasing SMAA"), &smaa)) g_settings.antialias = smaa ? AA_SMAA : AA_OFF;
@@ -448,9 +567,28 @@ static void ui(void) {
             ImGui::Checkbox(T("Mostrar FPS en la barra de título"), &g_settings.show_fps);
             ImGui::SeparatorText(T("Velocidad"));
             if (ImGui::Checkbox(T("V-Sync (con 30 / 60 FPS)"), &g_settings.vsync)) vk_request_swapchain_recreate();
+            {   // [XCDE] Cutscenes FPS mode (parity with launcher)
+                const char *cut_en[] = {"Same as game", "Steady 30 FPS (like Switch)", "30 FPS + Frame Gen (restart)"};
+                const char *cut_es[] = {"Como el resto del juego", "30 estables (como en Switch)", "30 FPS + Frame Gen (al reiniciar)"};
+                int cm = g_settings.cutscene_mode < 0 || g_settings.cutscene_mode > 2 ? 0 : g_settings.cutscene_mode;
+                if (monado_combo(en ? "Cutscenes" : "Cinemáticas", &cm, en ? cut_en : cut_es, 3)) g_settings.cutscene_mode = cm;
+            }
+            {   // [XCDE] Background FPS cap when unfocused
+                const char *bg_en[] = {"Off (uncapped)", "15 FPS", "30 FPS"};
+                const char *bg_es[] = {"Desactivado", "15 FPS", "30 FPS"};
+                int bi = g_settings.bg_fps == 15 ? 1 : g_settings.bg_fps == 30 ? 2 : 0;
+                if (monado_combo(en ? "Background FPS limit" : "Límite de FPS en segundo plano", &bi, en ? bg_en : bg_es, 3))
+                    g_settings.bg_fps = bi == 1 ? 15 : bi == 2 ? 30 : 0;
+                ImGui::SetItemTooltip("%s", en ? "Caps frame rate while the window is unfocused to reduce GPU/CPU load."
+                                               : "Limita los FPS cuando la ventana está en segundo plano para reducir la carga.");
+            }
             if (ImGui::Button(g_settings.ui_lang ? "Restore graphics" : "Restaurar gráficos")) {
-                xcde_quality_apply(&g_settings,QUALITY_BALANCED); quality_before=g_settings;
-                g_settings.graphics = GraphicsOptions{}; xcde_graphics_publish(&g_settings.graphics);  // (all choices to Original)
+                xcde_quality_apply(&g_settings,QUALITY_BALANCED);
+                if (g_settings.upscaler_auto && dlss_available()) g_settings.upscaler = UPSCALE_DLSS;
+                g_settings.upscale_sharpness = -1.0f;
+                xcde_graphics_publish(&g_settings.graphics);
+                xcde_foliage_set_preset(g_settings.grass_lod);
+                quality_before=g_settings;
             }
             ImGui::EndTabItem();
         }
@@ -541,8 +679,31 @@ static void ui(void) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(T("Audio"))) {
+            const bool en = g_settings.ui_lang != 0;
             int vol = (int)lroundf(g_settings.volume * 100);
             if (ImGui::SliderInt(T("Volumen"), &vol, 0, 200, "%d %%")) g_settings.volume = vol / 100.0f;
+            {   // [XCDE] Audio output device picker (live hot-swap)
+                int ndev = 0;
+                SDL_AudioDeviceID *devs = SDL_GetAudioPlaybackDevices(&ndev);
+                const char *cur = g_settings.audio_device[0] ? g_settings.audio_device : (en ? "System default" : "Predeterminado del sistema");
+                if (monado_begin_combo(en ? "Audio device" : "Dispositivo de audio", cur)) {
+                    if (ImGui::Selectable(en ? "System default" : "Predeterminado del sistema", !g_settings.audio_device[0])) {
+                        g_settings.audio_device[0] = 0;
+                        audio_notify_device_change();
+                    }
+                    for (int i = 0; devs && i < ndev; i++) {
+                        const char *dn = SDL_GetAudioDeviceName(devs[i]);
+                        if (!dn || !*dn) continue;
+                        bool sel = !strcmp(g_settings.audio_device, dn);
+                        if (ImGui::Selectable(dn, sel)) {
+                            snprintf(g_settings.audio_device, sizeof g_settings.audio_device, "%s", dn);
+                            audio_notify_device_change();
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                SDL_free(devs);
+            }
             static const char *audio_modes[] = {"Automático (5.1 si es compatible)", "Estéreo (2.0)", "Envolvente 5.1"};
             int am = audio_out_valid(g_settings.audio_channels);
             if (monado_combo(T("Salida de audio"), &am, TL(audio_modes, AUDIO_OUT_COUNT).p, AUDIO_OUT_COUNT)) {
@@ -552,12 +713,34 @@ static void ui(void) {
             ImGui::SetItemTooltip("%s", g_settings.ui_lang
                 ? "Auto uses 5.1 LPCM surround on 5.1/7.1 devices and Stereo otherwise.\nThe Switch game mixes up to 5.1 (SDL maps 5.1 onto 7.1 devices). Applies live."
                 : "Automático usa sonido envolvente 5.1 LPCM en dispositivos 5.1/7.1 y estéreo en el resto.\nEl juego de Switch mezcla hasta 5.1 (SDL adapta 5.1 a dispositivos 7.1). Se aplica al instante.");
+            ImGui::Checkbox(en ? "Mute audio when unfocused" : "Silenciar audio en segundo plano", &g_settings.mute_unfocused);
             ImGui::Checkbox(T("Audio de los vídeos (al reiniciar)"), &g_settings.movie_audio);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(T("Controles"))) {
-            ImGui::TextWrapped(T("La asignación de teclas y botones se cambia en el launcher (Play Monado.bat), pestaña Controles."));
-            ImGui::Checkbox(g_settings.ui_lang ? "Gamepad vibration" : "Vibración del mando", &g_settings.input_rumble);
+            const bool en = g_settings.ui_lang != 0;
+            ImGui::TextWrapped("%s", en
+                ? "Full button/key remapping is in the launcher's Controls tab. The options below apply live."
+                : "La asignación completa de teclas y botones está en la pestaña Controles del launcher. Las opciones de abajo se aplican al instante.");
+            ImGui::SeparatorText(en ? "Gamepad & Camera" : "Mando y cámara");
+            ImGui::Checkbox(en ? "Gamepad vibration" : "Vibración del mando", &g_settings.input_rumble);
+            ImGui::Checkbox(en ? "XC3-style party switch (L2 + L1/R1 or hotkey)" : "Cambio de personaje estilo XC3 (L2 + L1/R1 o atajo)", &g_party_switch);
+            ImGui::SliderInt(en ? "Stick deadzone (%)" : "Zona muerta de sticks (%)", &g_settings.stick_deadzone, 0, 30);
+            {
+                const char *ml_en[] = {"Off", "Hold right mouse button", "Always"};
+                const char *ml_es[] = {"No", "Manteniendo el botón derecho", "Siempre"};
+                monado_combo(en ? "Mouse camera" : "Cámara con el ratón", &g_mouse_look, en ? ml_en : ml_es, 3);
+            }
+            ImGui::BeginDisabled(!g_mouse_look);
+            ImGui::SliderInt(en ? "Mouse sensitivity" : "Sensibilidad del ratón", &g_mouse_sens, 1, 100);
+            ImGui::Checkbox(en ? "Invert mouse Y-axis" : "Invertir eje Y del ratón", &g_mouse_invert);
+            ImGui::EndDisabled();
+            ImGui::SeparatorText(en ? "Hotkeys" : "Atajos de teclado");
+            hotkey_combo(en ? "Overlay menu key" : "Tecla del menú de opciones", &g_settings.hotkey_menu, XCDE_KEY_F1, false, en);
+            ImGui::Checkbox(en ? "Open overlay with Start + Select" : "Abrir menú con Start + Select", &g_settings.menu_pad_combo);
+            hotkey_combo(en ? "Party switch key" : "Tecla de cambio de personaje", &g_settings.hotkey_party, XCDE_KEY_F2, true, en);
+            hotkey_combo(en ? "Screenshot key" : "Tecla de captura de pantalla", &g_settings.hotkey_screenshot, XCDE_KEY_F12, true, en);
+            hotkey_combo(en ? "Toggle field HUD key" : "Tecla para ocultar/mostrar HUD", &g_settings.hotkey_hud, XCDE_KEY_F4, true, en);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(T("Trucos"))) {
@@ -574,10 +757,14 @@ static void ui(void) {
         ImGui::EndTabBar();
     }
     ImGui::EndChild();
-    if (g_settings.quality_preset==quality_before.quality_preset && !xcde_quality_equal(xcde_quality_current(&quality_before),xcde_quality_current(&g_settings))) { g_settings.quality_preset=QUALITY_CUSTOM; saved_note=false; }
-    if (memcmp(&opening,&g_settings,sizeof g_settings)!=0) saved_note=false;
+    if (g_settings.quality_preset==quality_before.quality_preset && !xcde_quality_equal(xcde_quality_current(&quality_before),xcde_quality_current(&g_settings))) { g_settings.quality_preset=QUALITY_CUSTOM; saved_note=false; dirty=true; }
+    if (memcmp(&opening,&g_settings,sizeof g_settings)!=0 || open_party!=g_party_switch || open_w!=g_window_w ||
+        open_h!=g_window_h || open_ml!=g_mouse_look || open_ms!=g_mouse_sens || open_mi!=g_mouse_invert) {
+        saved_note = false;
+        dirty = true;
+    }
     ImGui::Separator();
-    if (ImGui::Button(g_settings.ui_lang ? "Apply" : "Aplicar")) { settings_save(); saved_note = true; }
+    if (ImGui::Button(g_settings.ui_lang ? "Apply" : "Aplicar")) { settings_save(); saved_note = true; dirty = false; }
     ImGui::SameLine();
     if (ImGui::Button(T("Volver al juego"))) { open_ = false; input_reset(); }
     ImGui::SameLine();
@@ -592,6 +779,7 @@ static void ui(void) {
         if (sure) { ImGui::SameLine(); ImGui::TextDisabled(g_settings.ui_lang ? "Sure? press again." : "\xC2\xBFSeguro? pulsa otra vez."); }
     }
     if (saved_note) { ImGui::SameLine(); ImGui::TextDisabled(T("Guardado en xcde.ini")); }
+    else if (dirty) { ImGui::SameLine(); ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.28f, 1.0f), "%s", g_settings.ui_lang ? "Unsaved changes (click Apply)" : "Cambios sin guardar (pulsa Aplicar)"); }
     ImGui::End();
 }
 
@@ -611,8 +799,35 @@ static void launch_hint(float s, uint64_t now) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16 * s, 10 * s));
     ImGui::Begin("##launch-hint", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
                  ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-    ImGui::TextUnformatted(g_settings.ui_lang ? "Press F1 (or Start + Select) to open the settings overlay"
-                                              : "Pulsa F1 (o Start + Select) para abrir el men\xC3\xBA de opciones");
+    const char *mk = xcde_hotkey_label(g_settings.hotkey_menu, XCDE_KEY_F1, g_settings.ui_lang != 0);
+    if (g_settings.menu_pad_combo)
+        ImGui::Text(g_settings.ui_lang ? "Press %s (or Start + Select) to open the settings overlay"
+                                       : "Pulsa %s (o Start + Select) para abrir el men\xC3\xBA de opciones", mk);
+    else
+        ImGui::Text(g_settings.ui_lang ? "Press %s to open the settings overlay"
+                                       : "Pulsa %s para abrir el men\xC3\xBA de opciones", mk);
+    ImGui::End();
+    ImGui::PopStyleVar(2);
+}
+
+static void draw_toast(float s, uint64_t now) {
+    char msg[320];
+    uint64_t rem = 0;
+    {
+        std::lock_guard<std::mutex> g(toast_lock);
+        if (!toast_until_ns || now >= toast_until_ns) return;
+        rem = toast_until_ns - now;
+        snprintf(msg, sizeof msg, "%s", toast_msg);
+    }
+    float a = rem < TOAST_FADE_NS ? (float)rem / (float)TOAST_FADE_NS : 1.0f;
+    ImGuiViewport *vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->Size.x * 0.5f, 24 * s), ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.88f * a);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, a);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16 * s, 10 * s));
+    ImGui::Begin("##toast", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                 ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::TextUnformatted(msg);
     ImGui::End();
     ImGui::PopStyleVar(2);
 }
@@ -622,12 +837,17 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
     static float font_h;
     static uint64_t t_last;
     bool show_counter = g_settings.fps_overlay && !diag_deterministic();
+    uint64_t now = SDL_GetTicksNS();
+    bool show_toast = false;
+    {
+        std::lock_guard<std::mutex> g(toast_lock);
+        show_toast = toast_until_ns && now < toast_until_ns;
+    }
     if (!hint_done) {
-        uint64_t now = SDL_GetTicksNS();
         if (!hint_t0) hint_t0 = now;
         if (open_ || diag_deterministic() || now - hint_t0 >= HINT_NS) hint_done = true;
     }
-    if (!open_ && !show_counter && hint_done) { perf_overlay_draw(false, 1, w, h); return; }  // (stops its GPU timing / sampling)
+    if (!open_ && !show_counter && hint_done && !show_toast) { perf_overlay_draw(false, 1, w, h); return; }  // (stops its GPU timing / sampling)
     if (!ctx) {
         ctx = ImGui::CreateContext();
         ImGui::SetCurrentContext(ctx);
@@ -667,7 +887,6 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
     ImGui::SetCurrentContext(ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
-    uint64_t now = SDL_GetTicksNS();
     io.DeltaTime = t_last ? (float)((now - t_last) / 1e9) : 1.0f / 60;
     if (io.DeltaTime <= 0) io.DeltaTime = 1.0f / 60;
     t_last = now;
@@ -677,7 +896,8 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
     if (open_) ui();
     want_text_input = open_ && io.WantTextInput;
     perf_overlay_draw(show_counter, font_h / 16.0f, w, h);  // [XCDE] GitHub #39: simple / detailed (perf_overlay.h)
-    if (!hint_done && !open_) launch_hint(font_h / 16.0f, now);
+    if (!hint_done && !open_ && !show_toast) launch_hint(font_h / 16.0f, now);
+    if (show_toast) draw_toast(font_h / 16.0f, now);
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);
 }

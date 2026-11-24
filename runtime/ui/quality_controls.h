@@ -7,11 +7,28 @@
 #include "../fps_limiter.h"
 static inline bool monado_quality_controls(Settings *s, bool en) {
     XcdeQuality before=xcde_quality_current(s); int old_fps=s->fps, old_lim=s->fps_limiter, old_preset=s->quality_preset;
-    int p=s->quality_preset;
-    if (monado_combo(en ? "Quality preset" : "Perfil de calidad", &p,
-                     en ? "Balanced\0Performance\0Potato\0Custom\0" : "Equilibrado\0Rendimiento\0Patata\0Personalizado\0")) {
+    static const int k_preset_order[] = {QUALITY_QUALITY, QUALITY_BALANCED, QUALITY_HANDHELD, QUALITY_PERFORMANCE, QUALITY_POTATO, QUALITY_CUSTOM};
+    int ui_p = 1; // Balanced
+    for (int i = 0; i < 6; i++) if (k_preset_order[i] == s->quality_preset) ui_p = i;
+    if (monado_combo(en ? "Quality preset" : "Perfil de calidad", &ui_p,
+                     en ? "Quality\0Balanced\0Handheld\0Performance\0Potato\0Custom\0"
+                        : "Calidad\0Equilibrado\0Portátil\0Rendimiento\0Patata\0Personalizado\0")) {
+        int p = k_preset_order[ui_p];
         if (p==QUALITY_CUSTOM) s->quality_preset=p; else xcde_quality_apply(s,p);
     }
+    ImGui::SetItemTooltip("%s", en
+        ? "Quality: maxed out (Native, Ultra grass 3x, 2048 px shadows, Ultra LOD, 16x AF).\n"
+          "Balanced: project default baseline (Match window, Auto upscaler, High grass 1.7x, Full shadow mask, 16x AF).\n"
+          "Handheld: 540-720p dynamic, FSR 3 (FSR 1 fallback), Original grass, 8x AF, SSR/god rays off.\n"
+          "Performance: 540-720p dynamic, FSR 3 (FSR 1 fallback), Original grass, Low prop LOD, lighter shadows/effects.\n"
+          "Potato: 360-540p dynamic, FSR 1, Low grass, all optional shadows/effects and TAA off.\n"
+          "Live options apply immediately; restart-only options (blur, shadow maps/mask, prop LOD) apply on next launch."
+        : "Calidad: todo al máximo (Nativo, hierba Ultra 3x, sombras 2048 px, LOD Ultra, AF 16x).\n"
+          "Equilibrado: base predeterminada del proyecto (Igual que la ventana, escalado automático, hierba Alta 1,7x, máscara completa, AF 16x).\n"
+          "Portátil: dinámica 540-720p, FSR 3 (respaldo FSR 1), hierba Original, AF 8x, SSR/rayos de luz desactivados.\n"
+          "Rendimiento: dinámica 540-720p, FSR 3 (respaldo FSR 1), hierba Original, LOD bajo, sombras/efectos más ligeros.\n"
+          "Patata: dinámica 360-540p, FSR 1, hierba Baja, todas las sombras/efectos opcionales y TAA desactivados.\n"
+          "Los ajustes en vivo se aplican al instante; los marcados \"al reiniciar\" se aplican al próximo inicio.");
     static bool custom_fps_open = false;
     bool is_preset = s->fps==30 || s->fps==60 || s->fps==0 || s->fps==120 || s->fps==144 || s->fps==165;
     if (!is_preset) custom_fps_open = true;
@@ -52,8 +69,8 @@ static inline bool monado_quality_controls(Settings *s, bool en) {
           "Early: RTSS / MangoHud style host limiter before each frame (fixed-cadence sleep + spin) for flatter frame times and lower latency. Applies live."
         : "Predeterminado: usa el limitador del juego.\n"
           "Temprano: limitador del host estilo RTSS / MangoHud antes de cada frame (espera fija + spin) para tiempos más estables y menor latencia. Se aplica al instante.");
-    ImGui::TextWrapped("%s",en ? "Targets depend on hardware. Frame rate changes apply live (F1), no restart needed." :
-                       "El objetivo depende del equipo. Los FPS se aplican en vivo (F1), sin reiniciar.");
+    ImGui::TextWrapped("%s",en ? "Targets depend on hardware. Frame rate changes apply live (F1); some preset options (blur, shadow maps/mask, prop LOD) apply on restart." :
+                       "El objetivo depende del equipo. Los FPS se aplican en vivo (F1); algunos ajustes de perfil (desenfoque, mapas/máscara de sombras, LOD) se aplican al reiniciar.");
     if (s->res_mode==RES_DYNAMIC && s->dynamic_max_height)
         ImGui::Text(en ? "Internal range: %d-%dp (capped by output)" : "Rango interno: %d-%dp (limitado por la salida)",s->dynamic_min_height,s->dynamic_max_height);
     if (s->res_mode==RES_DYNAMIC && ImGui::CollapsingHeader(en ? "Dynamic resolution limits" : "Límites de resolución dinamica")) {
@@ -87,7 +104,6 @@ static inline const char *monado_gfx_tooltip(int i, bool en) {
                              "tenue detrás de objetos finos (cuerdas, barandillas) al mover la cámara.";
     default: return nullptr;
     }
-    ImGui::PopID();
 }
 static inline bool monado_gfx_group(GraphicsOptions *o, const int *ids, int n, bool en, float width = 0) {
     bool changed = false;

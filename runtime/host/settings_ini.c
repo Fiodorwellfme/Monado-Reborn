@@ -21,7 +21,7 @@ const char *const g_language_codes[N_LANGUAGES] = {"", "ja", "en-US", "fr", "de"
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "French", "German", "Italian", "Spanish",
                                                    "Chinese", "Korean", "Dutch", "Portuguese", "Russian",
                                                    "Chinese (Simplified)", "Chinese (Traditional)"};
-Settings g_settings = {.fps = 30, .fps_overlay = true, .upscaler_auto = true, .volume = 1.0f, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_FSR1, .upscale_quality = UQ_QUALITY, .upscale_sharpness = -1.0f, .game_blur = true, .vsync = true, .ui_lang = 1, .gpu_index = -1, .gpu_profile = GPU_PROFILE_AUTO, .gpu_gpl = GPU_GPL_AUTO, .occlusion = OCCL_AUTO, .amd_fix = AMD_FIX_AUTO, .session_fix = SESSION_FIX_AUTO, .gpu_memory_budget = true, .input_rumble = true, .grass_lod = GRASS_DEFAULT, .run_speed = 1.0f, .ui_scale = 100,
+Settings g_settings = {.fps = 30, .fps_overlay = true, .upscaler_auto = true, .volume = 1.0f, .display_index = -1, .hotkey_menu = XCDE_KEY_F1, .menu_pad_combo = true, .hotkey_party = XCDE_KEY_F2, .hotkey_screenshot = XCDE_KEY_F12, .hotkey_hud = XCDE_KEY_F4, .movie_audio = true, .res_mode = RES_MATCH, .upscaler = UPSCALE_FSR1, .upscale_quality = UQ_QUALITY, .upscale_sharpness = -1.0f, .game_blur = true, .vsync = true, .ui_lang = 1, .gpu_index = -1, .gpu_profile = GPU_PROFILE_AUTO, .gpu_gpl = GPU_GPL_AUTO, .occlusion = OCCL_AUTO, .amd_fix = AMD_FIX_AUTO, .session_fix = SESSION_FIX_AUTO, .gpu_memory_budget = true, .input_rumble = true, .grass_lod = GRASS_DEFAULT, .run_speed = 1.0f, .ui_scale = 100,
     .cheat_damage_dealt_percent = 100, .cheat_damage_received_percent = 100, .cheat_exp_percent = 100, .cheat_ap_percent = 100,
     .cheat_sp_percent = 100, .cheat_gold_percent = 100, .cheat_enemy_health_percent = 100, .save_slots_99 = true,
     .graphics = {.value = {[GFX_SHADOW_MASK] = 1}}};
@@ -31,6 +31,32 @@ int g_window_w = 1280, g_window_h = 720;  // windowed size (settings.h)
 bool g_party_switch;  // [XCDE] party mod: xcde.ini party_switch = 0/1 (off by default; runtime/hle/party.c)
 static struct { char name[96]; bool on; } g_mods[128];
 static int g_nmods;
+static char g_mod_order[128][96];
+static int g_mod_order_n;
+static void mod_order_parse(const char *v) {
+    g_mod_order_n = 0;
+    if (!v || !*v) return;
+    const char *p = v;
+    while (*p && g_mod_order_n < 128) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (!*p) break;
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        const char *end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        size_t len = (size_t)(end - start);
+        if (len > 0 && len < sizeof g_mod_order[0]) {
+            memcpy(g_mod_order[g_mod_order_n], start, len);
+            g_mod_order[g_mod_order_n][len] = 0;
+            g_mod_order_n++;
+        }
+    }
+}
+int settings_mod_priority(const char *name) {
+    if (!name) return 0x7fffffff;
+    for (int i = 0; i < g_mod_order_n; i++) if (!strcmp(g_mod_order[i], name)) return i;
+    return 0x7fffffff;
+}
 static void mod_set(const char *name, bool on) {
     for (int i = 0; i < g_nmods; i++) if (!strcmp(g_mods[i].name, name)) { g_mods[i].on = on; return; }
     if (g_nmods == 128) return;
@@ -82,6 +108,8 @@ void settings_load(void) {
         *eq = 0;
         char *k = trim(s), *v = trim(eq + 1);
         if (!strcmp(k, "fullscreen")) g_settings.fullscreen = atoi(v) != 0;
+        else if (!strcmp(k, "fullscreen_mode")) g_settings.fullscreen_mode = !strcmp(v, "exclusive") ? FULLSCREEN_EXCLUSIVE : FULLSCREEN_BORDERLESS;
+        else if (!strcmp(k, "display_index")) { int d = atoi(v); g_settings.display_index = d < -1 ? -1 : d > 15 ? 15 : d; }
         else if (!strcmp(k, "aspect")) g_settings.aspect = !strcmp(v, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(k, "window")) sscanf(v, "%dx%d", &g_window_w, &g_window_h);
         else if (!strcmp(k, "resolution")) {  // match | 1x..8x | 1.5x | 75% | 50% | 25% | dynamic
@@ -111,7 +139,7 @@ void settings_load(void) {
         else if (!strcmp(k, "fps_overlay_style")) g_settings.fps_overlay_style = !strcmp(v, "simple") ? FPS_OVERLAY_SIMPLE : FPS_OVERLAY_DETAILED;
         else if (!strcmp(k, "fps_overlay_scale")) g_settings.fps_overlay_scale = perf_overlay_scale_percent(atoi(v));  // GitHub #147
         else if (!strcmp(k, "fps_overlay_position")) g_settings.fps_overlay_pos = perf_overlay_pos_parse(v);
-        else if (!strcmp(k, "gpu_preset")) { g_settings.quality_preset = xcde_quality_parse(v); g_settings.gpu_performance = g_settings.quality_preset == QUALITY_PERFORMANCE || g_settings.quality_preset == QUALITY_POTATO; }
+        else if (!strcmp(k, "gpu_preset")) { g_settings.quality_preset = xcde_quality_parse(v); g_settings.gpu_performance = xcde_quality_is_performance(g_settings.quality_preset); }
         else if (!strcmp(k, "low_memory")) g_settings.gpu_performance = atoi(v) != 0;
         else if (!strcmp(k, "dynamic_min_height")) g_settings.dynamic_min_height = atoi(v);
         else if (!strcmp(k, "dynamic_max_height")) g_settings.dynamic_max_height = atoi(v);
@@ -150,11 +178,20 @@ void settings_load(void) {
         else if (!strcmp(k, "ui_scale")) g_settings.ui_scale = ui_scale_percent(atoi(v));  // [XCDE] GitHub #121
         else if (!strcmp(k, "volume")) g_settings.volume = (float)atof(v) / 100.0f;
         else if (!strcmp(k, "audio_channels")) g_settings.audio_channels = audio_out_parse(v);  // [XCDE]
+        else if (!strcmp(k, "audio_device")) snprintf(g_settings.audio_device, sizeof g_settings.audio_device, "%s", v);
+        else if (!strcmp(k, "mute_unfocused")) g_settings.mute_unfocused = atoi(v) != 0;
+        else if (!strcmp(k, "bg_fps")) { int b = atoi(v); g_settings.bg_fps = (b == 15 || b == 30) ? b : 0; }
+        else if (!strcmp(k, "hotkey_menu")) g_settings.hotkey_menu = xcde_hotkey_parse(v, XCDE_KEY_F1, false);
+        else if (!strcmp(k, "menu_pad_combo")) g_settings.menu_pad_combo = atoi(v) != 0;
+        else if (!strcmp(k, "hotkey_party")) g_settings.hotkey_party = xcde_hotkey_parse(v, XCDE_KEY_F2, true);
+        else if (!strcmp(k, "hotkey_screenshot")) g_settings.hotkey_screenshot = xcde_hotkey_parse(v, XCDE_KEY_F12, true);
+        else if (!strcmp(k, "hotkey_hud")) g_settings.hotkey_hud = xcde_hotkey_parse(v, XCDE_KEY_F4, true);
         else if (!strcmp(k, "movie_audio")) g_settings.movie_audio = atoi(v) != 0;
         else if (!strcmp(k, "show_fps")) g_settings.show_fps = atoi(v) != 0;
         else if (!strcmp(k, "fps")) g_settings.fps = xcde_fps_parse(v);
         else if (!strcmp(k, "fps_limiter")) g_settings.fps_limiter = xcde_fps_limiter_parse(v);
         else if (!strcmp(k, "language")) g_settings.language = lang_index(v);
+        else if (!strcmp(k, "mod_order")) mod_order_parse(v);
         else if (!strncmp(k, "mod_", 4)) mod_set(k + 4, atoi(v) != 0);
         else if (!strcmp(k, "button_icons")) snprintf(g_button_icons, sizeof g_button_icons, "%s", v);
         else if (!gfx_load_key(&g_settings.graphics, k, v)) bind_settings_load(k, v);  // [XCDE] graphics options
@@ -182,7 +219,9 @@ void settings_save(void) {
     if (!f) return;
     static const char *res[] = {"match", "1", "2", "3", "4", "5", "6", "7", "8", "dynamic", "75%", "25%", "50%", "1.5"};
     fprintf(f, "# Monado settings (the launcher writes this file)\n");
-    fprintf(f, "fullscreen = %d\nwindow = %dx%d\n", g_settings.fullscreen, g_window_w, g_window_h);
+    fprintf(f, "fullscreen = %d\nfullscreen_mode = %s\ndisplay_index = %d\nwindow = %dx%d\n",
+            g_settings.fullscreen, g_settings.fullscreen_mode == FULLSCREEN_EXCLUSIVE ? "exclusive" : "borderless",
+            g_settings.display_index, g_window_w, g_window_h);
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_ORIGINAL ? "original" : "auto");
     fprintf(f, "resolution = %s\n", g_settings.res_mode >= 0 && g_settings.res_mode <= RES_1_5 ? res[g_settings.res_mode] : "match");
     static const char *up[] = {"bilinear", "bilinear", "fsr", "fsr3", "dlss", "fsr4lite"};
@@ -230,12 +269,24 @@ void settings_save(void) {
             xcde_quality_name(g_settings.quality_preset), g_settings.gpu_keep_heavy);
     fprintf(f, "low_memory = %d\ndynamic_min_height = %d\ndynamic_max_height = %d\neffects_off = %u\n",
             g_settings.gpu_performance, g_settings.dynamic_min_height, g_settings.dynamic_max_height, g_settings.effects_off);
-    fprintf(f, "volume = %d\naudio_channels = %s\nmovie_audio = %d\nshow_fps = %d\n", (int)(g_settings.volume * 100 + 0.5f),
-            audio_out_ini[audio_out_valid(g_settings.audio_channels)], g_settings.movie_audio,
+    fprintf(f, "volume = %d\naudio_channels = %s\naudio_device = %s\nmute_unfocused = %d\nbg_fps = %d\nmovie_audio = %d\nshow_fps = %d\n",
+            (int)(g_settings.volume * 100 + 0.5f),
+            audio_out_ini[audio_out_valid(g_settings.audio_channels)], g_settings.audio_device,
+            g_settings.mute_unfocused, g_settings.bg_fps, g_settings.movie_audio,
             g_settings.show_fps);
+    fprintf(f, "hotkey_menu = %s\nmenu_pad_combo = %d\nhotkey_party = %s\nhotkey_screenshot = %s\nhotkey_hud = %s\n",
+            xcde_hotkey_ini(g_settings.hotkey_menu, XCDE_KEY_F1), g_settings.menu_pad_combo,
+            xcde_hotkey_ini(g_settings.hotkey_party, XCDE_KEY_F2),
+            xcde_hotkey_ini(g_settings.hotkey_screenshot, XCDE_KEY_F12),
+            xcde_hotkey_ini(g_settings.hotkey_hud, XCDE_KEY_F4));
     if (g_settings.fps) fprintf(f, "fps = %d\n", g_settings.fps); else fprintf(f, "fps = unlimited\n");
     fprintf(f, "fps_limiter = %s\n", xcde_fps_limiter_ini[xcde_fps_limiter_valid(g_settings.fps_limiter)]);
     fprintf(f, "language = %s\n", g_settings.language > 0 && g_settings.language < N_LANGUAGES ? g_language_codes[g_settings.language] : "auto");
+    if (g_mod_order_n > 0) {
+        fprintf(f, "mod_order = ");
+        for (int i = 0; i < g_mod_order_n; i++) fprintf(f, "%s%s", i ? "," : "", g_mod_order[i]);
+        fputc('\n', f);
+    }
     for (int i = 0; i < g_nmods; i++) fprintf(f, "mod_%s = %d\n", g_mods[i].name, g_mods[i].on);
     fprintf(f, "button_icons = %s\n", g_button_icons);
     bind_settings_save(f);

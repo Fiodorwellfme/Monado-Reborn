@@ -9,15 +9,18 @@ game's original files. The evidence for this machine is recorded in
 Run `Play Monado.bat`. In **Home**, choose quality and FPS target separately. For the Ryzen 7 7730U, the proposed
 starting point is **Potato + 30 FPS**. It is a target, not a performance guarantee.
 
-| Profile | Dynamic internal resolution | Settings applied |
+| Profile | Internal resolution | Settings applied |
 |---|---|---|
-| Balanced | No additional absolute limit; matches the window | Automatic FSR, additional AA disabled, original blur, original effects |
-| Performance | 540–720 pixel height | FSR 1, no SMAA, DOF or blur; frame generation disabled; reduced caches |
-| Potato | 360–540 pixel height | The same safe cuts as Performance, at lower resolution |
+| Quality | Matches the window (Native AA) | Auto upscaler (Native), no SMAA, Ultra grass (3x), 2048 px shadow maps, Full shadow mask, Ultra prop LOD (2x), 16x AF, original blur/effects |
+| Balanced | Matches the window | Project default baseline: Auto upscaler (Quality), High grass (1.7x), Full shadow mask, 16x AF, original shadows/LOD/blur/effects |
+| Handheld | 540–720 pixel height (dynamic) | FSR 3 (FSR 1 fallback), Original grass (1x), Original shadow mask, 8x AF, SSR/god rays off, original shadows/AO/bloom/DOF/blur |
+| Performance | 540–720 pixel height (dynamic) | FSR 3 (FSR 1 fallback), no SMAA/DOF/blur, Original grass (1x), Original shadow mask, Low prop LOD (0.5x), cloud shadows/SSR/god rays off |
+| Potato | 360–540 pixel height (dynamic) | Lowest possible: FSR 1, no SMAA/DOF/blur/TAA, Low grass (0.5x), Low prop LOD (0.5x), shadows and all optional effects off |
 | Custom | Manual | Keeps the individual changes and their limits |
 
 The ranges keep the aspect ratio and never exceed the output. The game's own menu/HUD resolution can also lose
-sharpness. Changing the FPS, the game's blur or the resource policy requires a restart to apply the full profile.
+sharpness. Changing restart-only options (game blur, shadow maps/mask, prop LOD, auto upscaler) requires a restart to
+apply the full profile; live options (resolution, grass distance, effects) apply immediately in F1.
 Changing quality does not change the requested FPS, GPU, volume, controls or saves.
 
 Ambient occlusion, reflections, bloom, god rays and cloud shadows are Original / Off / On options of the launcher
