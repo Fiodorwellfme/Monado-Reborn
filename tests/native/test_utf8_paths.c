@@ -7,6 +7,9 @@
 // Build/run: cc -std=c11 tests/native/test_utf8_paths.c -o t && ./t [folder]
 // Linux: scripts/native_tests_linux.sh. Windows: scripts/native_tests.sh and tools/diag/validate_port.py, where the
 // wide CreateDirectoryW below is what creates the folder and the wrappers are what find it.
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -18,9 +21,11 @@
 #include "../../runtime/platform/dir_utf8.h"
 #ifdef _WIN32
 #include <dirent.h>  // (only to report what the CRT's opendir does in the same folder)
+#include <winioctl.h>
 #endif
 
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -105,7 +110,7 @@ int main(int argc, char **argv) {
     // what the launcher does not do - its root comes from SDL_GetBasePath as UTF-8)
     const char *base = argc > 1 ? argv[1] : "build";
     // João + a grinning face, in UTF-8 (the bytes a joão-based install folder has)
-    char root[4096], dir[4096], file[4200], file2[4200], tmp[4200], text[16];
+    char root[4096], dir[4200], file[4400], file2[4400], tmp[4400], sparse[4400], text[16];
 #ifdef _WIN32
     // The launcher's root is absolute: complete a relative folder with the current directory, which is where the
     // non-ASCII part of an install path lives ("C:\Users\João\...").
@@ -123,6 +128,7 @@ int main(int argc, char **argv) {
     snprintf(file, sizeof file, "%s/file.txt", dir);
     snprintf(file2, sizeof file2, "%s/renamed.txt", dir);
     snprintf(tmp, sizeof tmp, "%s/file.tmp", dir);
+    snprintf(sparse, sizeof sparse, "%s/sparse.bin", dir);
 #ifdef _WIN32
     wchar_t wroot[XCDE_PATH_W], wdir[XCDE_PATH_W];
     CHECK(xcde_utf8_to_wide(root, wroot, XCDE_PATH_W) >= 0);
@@ -198,6 +204,39 @@ int main(int argc, char **argv) {
     CHECK(!strcmp(env, "Jo\xC3\xA3" "o-\xF0\x9F\x98\x80"));
 #endif
     CHECK(xcde_utf8_chdir(cwd) == 0);
+
+    // A sparse 3 GiB file exercises the 64-bit metadata path that the Windows CRT's _wstat64i32 cannot represent.
+    // The stock SPIR-V pack already exceeds 2 GiB, so this is a real cache-validation case, not a synthetic edge only.
+    const uint64_t large_size = 3ull << 30;
+#ifdef _WIN32
+    wchar_t wsparse[XCDE_PATH_W];
+    CHECK(xcde_utf8_to_wide(sparse, wsparse, XCDE_PATH_W) >= 0);
+    HANDLE hs = CreateFileW(wsparse, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    CHECK(hs != INVALID_HANDLE_VALUE);
+    if (hs != INVALID_HANDLE_VALUE) {
+        DWORD ignored = 0;
+        CHECK(DeviceIoControl(hs, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &ignored, NULL));
+        LARGE_INTEGER end;
+        end.QuadPart = (LONGLONG)large_size;
+        CHECK(SetFilePointerEx(hs, end, NULL, FILE_BEGIN));
+        CHECK(SetEndOfFile(hs));
+        CloseHandle(hs);
+    }
+#else
+    int fd = open(sparse, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        CHECK(ftruncate(fd, (off_t)large_size) == 0);
+        close(fd);
+    }
+#endif
+    XcdeFileInfo large_info = {0};
+    CHECK(xcde_utf8_file_info(sparse, &large_info));
+    CHECK(!large_info.isdir);
+    CHECK(large_info.isreg);
+    CHECK(large_info.size == large_size);
+    CHECK(xcde_utf8_remove(sparse) == 0);
 
     // rename, then the same-directory replacement (T247)
     CHECK(xcde_utf8_rename(file, file2) == 0);

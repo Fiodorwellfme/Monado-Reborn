@@ -479,3 +479,20 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
 - Validation: 242 unit tests (10 skipped), the Linux native suite, focused Clang/GCC signature tests, a cold-start translator
   TSAN run, targeted Clang compilation of `precompile.c`, and ASan/UBSan cache-mode/scanner harnesses (including a sparse
   3 GiB pack) pass. The Windows branch was source-reviewed but not executed locally.
+
+## 2026-11-24 — PR #247 review follow-up
+
+- Only required scan/base-program failures block a current stamp. Extra/named guesses, seed records and whole pipelines
+  remain best-effort; their failures are reported without forcing a full rerun on every launch. `n_built` counts base
+  programs again, and incompatible variant-record sizes are skipped before creating jobs.
+- `--precompile-status` returns 3 when SPIR-V persistence is disabled. The launcher and RecompLauncher builder show that
+  precompilation does not apply and skip the repeated full pass; a manual precompile still runs when requested.
+- The scan budget has a separate large-file slot counter, so small files no longer delay a `>64 MiB` container. Directory
+  and metadata failures make the signature/scan incomplete instead of being silently skipped.
+- A shared `xcde_utf8_file_info()` helper gives the game-file reader, signature walk, precompile listing and cache validator
+  64-bit metadata on Windows. The native UTF-8 path test now creates a sparse 3 GiB file and verifies its reported size.
+- `XCDE_GLSL_DIR` hashes the override `.glsl` bytes as well as the directory path, so in-place debug-shader edits invalidate
+  the precompile signature.
+- Validation: 248 unit tests (10 skipped), the Linux native suite, focused Clang/GCC signature and sparse-file tests,
+  targeted Clang syntax checks for `precompile.c`/`exec.c`, and the Linux launcher syntax check pass. Windows execution is
+  still pending; the sparse-file test is included in the Windows validation suite.

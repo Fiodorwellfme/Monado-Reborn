@@ -7,8 +7,13 @@
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <wchar.h>  // _wrename (in stdio.h only on some CRTs; _wfopen/_wremove are there too)
+
+// 64-bit file metadata shared by the cache validator, game-file reader and signature walk.
+typedef struct { bool isdir, isreg; uint64_t size; int64_t mtime; } XcdeFileInfo;
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -141,3 +146,35 @@ static inline bool xcde_utf8_getenv(const char *name, char *out, size_t cap) {
 }
 static inline void *xcde_utf8_load_library(const char *path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
 #endif
+
+// The Windows CRT's struct stat / _wstat64i32 truncates sizes above 2 GiB (the SPIR-V pack and future/modded game
+// containers can be larger); use the wide API there. POSIX stat already has a 64-bit off_t.
+static inline bool xcde_utf8_file_info(const char *path, XcdeFileInfo *out) {
+#ifdef _WIN32
+    wchar_t wpath[XCDE_PATH_W];
+    if (!path || !out || xcde_utf8_to_wide(path, wpath, XCDE_PATH_W) < 0) return false;
+    HANDLE h = CreateFileW(wpath, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    BY_HANDLE_FILE_INFORMATION fi;
+    bool ok = GetFileInformationByHandle(h, &fi) != 0;
+    CloseHandle(h);
+    if (!ok) return false;
+    out->isdir = (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    out->isreg = !out->isdir && !(fi.dwFileAttributes & FILE_ATTRIBUTE_DEVICE);
+    out->size = ((uint64_t)fi.nFileSizeHigh << 32) | fi.nFileSizeLow;
+    ULARGE_INTEGER t;
+    t.LowPart = fi.ftLastWriteTime.dwLowDateTime;
+    t.HighPart = fi.ftLastWriteTime.dwHighDateTime;
+    out->mtime = (int64_t)(t.QuadPart / 10000000ull) - 11644473600ll;
+    return true;
+#else
+    struct stat sb;
+    if (!path || !out || stat(path, &sb)) return false;
+    out->isdir = S_ISDIR(sb.st_mode);
+    out->isreg = S_ISREG(sb.st_mode);
+    out->size = (uint64_t)sb.st_size;
+    out->mtime = (int64_t)sb.st_mtime;
+    return true;
+#endif
+}

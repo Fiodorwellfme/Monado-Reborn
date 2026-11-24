@@ -1874,3 +1874,7 @@ Detalle: `docs/PERFORMANCE_UI.md`. Evidencia: `docs/evidence/2026-11-04-performa
   and check thread startup; validate/invalidate before forced cleanup; track loose-cache completion; fingerprint the game-file
   reader and bloom/GTAO GLSL headers plus their environment switches; keep UNKNOWN launcher status distinct and restore
   removed Diagnostics environment rows.
+- [x] T282 PR #247 review follow-up: keep required failures fatal but guessed/seed/pipeline work best-effort; validate
+  variant record size; return a distinct persistence-disabled status; separate large-file scan slots; fail incomplete
+  directory walks; use shared 64-bit Windows metadata for game files and caches with a sparse 3 GiB native test; hash
+  `XCDE_GLSL_DIR` override bytes.

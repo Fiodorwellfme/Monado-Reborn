@@ -16,7 +16,8 @@
 //    XCDE_SPIRV_LOOSE, LARECOMP_VK_NO_SPIRV_CACHE), the translator switches that change the emitted GLSL
 //    (XCDE_STATIC_STACKS, XCDE_RSC_PIXEL, XCDE_D16_REF, XCDE_SCALED_GATHER, LARECOMP_NO_DISCARD, XCDE_HW_FP16,
 //    XCDE_EARLY_FS, XCDE_STRUCTURED_CFG, LARECOMP_SAVE_MSL), the replacement/patch sources and overrides
-//    (XCDE_BLOOM_PREFILTER, XCDE_BLOOM_FILTER, XCDE_GTAO, XCDE_CHAR_LIGHT, XCDE_TMAA_TEXEL, XCDE_GLSL_DIR), the
+//    (XCDE_BLOOM_PREFILTER, XCDE_BLOOM_FILTER, XCDE_GTAO, XCDE_CHAR_LIGHT, XCDE_TMAA_TEXEL, XCDE_GLSL_DIR; the
+//    override directory's .glsl bytes are hashed too), the
 //    pipeline/layout policy reachable from the precompile build (LARECOMP_VK_GPL, XCDE_VK_GPL, XCDE_PUSH_DESC,
 //    XCDE_CANON, XCDE_GPL_RETAIN, LARECOMP_VK_D24) and the precompile's own pass switches (XCDE_PRECOMPILE_LIBS,
 //    XCDE_PRECOMPILE_PIPELINES).
@@ -25,18 +26,18 @@
 //  - the shipped variant seed (XCDE_VARIANTS_SEED or data/variants_seed.bin): size and mtime. New recorded variants
 //    mean new jobs to warm.
 // A root is a dump folder with a readable romfs/ or a .nup package file; anything else is "unreadable" (2), not "stale".
-// One unreadable file inside romfs is skipped, exactly as the shader scan skips it: a dangling link cannot stop the
-// whole precompile.
+// An unreadable directory or entry inside romfs also makes the signature unreadable: a partial walk must not describe a
+// complete cache.
 //
 // Not covered: cache/variants.bin (the player's own recordings: it grows while playing, so it must not invalidate the
 // cache) and the graphics driver, including the Vulkan route / selected adapter from xcde.ini (the driver's shader
 // caches are its own: after a driver update, a GPU switch or a Vulkan API route change press "Precompile shaders").
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "../../host/utf8_path.h"
 #include "../../platform/dir_utf8.h"
@@ -69,39 +70,10 @@ static bool env_present(const char *name) {
 #endif
 }
 
-// The root's metadata with a 64-bit size: a .nup package is ~15 GB, and Windows' struct stat is 32-bit (T280: the
-// package "wasn't seen as one"). On Windows the path is opened through the wide API, which also follows a symlinked
-// root (the launcher's targets/) to its target; on POSIX stat() already gives 64-bit sizes.
-typedef struct { bool isdir; uint64_t size; int64_t mtime; } RootInfo;
-#ifdef _WIN32
-static bool root_info(const char *path, RootInfo *out) {
-    wchar_t wpath[XCDE_PATH_W];
-    if (xcde_utf8_to_wide(path, wpath, XCDE_PATH_W) < 0) return false;
-    HANDLE h = CreateFileW(wpath, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    BY_HANDLE_FILE_INFORMATION fi;
-    bool ok = GetFileInformationByHandle(h, &fi) != 0;
-    CloseHandle(h);
-    if (!ok) return false;
-    out->isdir = (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-    out->size = ((uint64_t)fi.nFileSizeHigh << 32) | fi.nFileSizeLow;
-    ULARGE_INTEGER t;
-    t.LowPart = fi.ftLastWriteTime.dwLowDateTime;
-    t.HighPart = fi.ftLastWriteTime.dwHighDateTime;
-    out->mtime = (int64_t)(t.QuadPart / 10000000ull) - 11644473600ll;  // FILETIME (1601) -> Unix seconds
-    return true;
-}
-#else
-static bool root_info(const char *path, RootInfo *out) {
-    struct stat sb;
-    if (stat(path, &sb)) return false;
-    out->isdir = S_ISDIR(sb.st_mode);
-    out->size = (uint64_t)sb.st_size;
-    out->mtime = (int64_t)sb.st_mtime;
-    return true;
-}
-#endif
+// The shared helper keeps sizes 64-bit on Windows (a .nup package is ~15 GB) and follows a symlinked root such as
+// the launcher's targets/ to its target.
+typedef XcdeFileInfo RootInfo;
+static bool root_info(const char *path, RootInfo *out) { return xcde_utf8_file_info(path, out); }
 
 // A package file is told by its first bytes (runtime/services/game_files.c), never by its name.
 static bool is_package_file(const char *path) {
@@ -113,9 +85,9 @@ static bool is_package_file(const char *path) {
     return yes;
 }
 
-// Every file under dir, by relative name (rel): added to *sum, so the folder enumeration order does not matter. Entries
-// whose stat fails are skipped, like the shader scan skips them (precompile.c list_dir); the depth cap turns a symlink
-// loop into "unreadable" instead of a stack exhaustion.
+// Every file under dir, by relative name (rel): added to *sum, so the folder enumeration order does not matter. An
+// unreadable directory or entry makes the signature unreadable rather than silently describing an incomplete scan; the
+// depth cap turns a symlink loop into "unreadable" instead of a stack exhaustion.
 #define MIX_DIR_MAX_DEPTH 64
 static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, uint64_t *files) {
     if (depth > MIX_DIR_MAX_DEPTH) return false;
@@ -127,15 +99,48 @@ static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, 
         if (e->d_name[0] == '.') continue;
         char p[2048], r[2048];
         int np = snprintf(p, sizeof p, "%s/%s", dir, e->d_name), nr = snprintf(r, sizeof r, "%s/%s", rel, e->d_name);
-        if (np < 0 || (size_t)np >= sizeof p || nr < 0 || (size_t)nr >= sizeof r) continue;
-        struct stat sb;
-        if (xcde_utf8_stat(p, &sb)) continue;
-        if (S_ISDIR(sb.st_mode)) {
+        if (np < 0 || (size_t)np >= sizeof p || nr < 0 || (size_t)nr >= sizeof r) { ok = false; break; }
+        XcdeFileInfo fi;
+        if (!xcde_utf8_file_info(p, &fi)) { ok = false; break; }
+        if (fi.isdir) {
             if (!mix_dir(p, r, depth + 1, sum, files)) { ok = false; break; }
-        } else if (S_ISREG(sb.st_mode)) {
-            *sum += mix_stat(mix(0xcbf29ce484222325ull, r, strlen(r)), (uint64_t)sb.st_size, (int64_t)sb.st_mtime);
+        } else if (fi.isreg) {
+            *sum += mix_stat(mix(0xcbf29ce484222325ull, r, strlen(r)), fi.size, fi.mtime);
             (*files)++;
         }
+    }
+    xcde_closedir(dd);
+    return ok;
+}
+
+// XCDE_GLSL_DIR is a debug override directory read directly by exec.c's compile_program. Its path is already in the
+// environment signature; hash the .glsl bytes too so an in-place edit cannot leave an old precompile looking current.
+static bool mix_glsl_dir(const char *dir, uint64_t *sum, uint64_t *files) {
+    XcdeDir *dd = xcde_opendir(dir);
+    if (!dd) return errno == ENOENT || !*dir;  // a missing override directory simply supplies no files
+    bool ok = true;
+    XcdeDirent *e;
+    while ((e = xcde_readdir(dd))) {
+        size_t n = strlen(e->d_name);
+        if (e->d_name[0] == '.' || n < 5 || strcmp(e->d_name + n - 5, ".glsl")) continue;
+        char path[2048];
+        int len = snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+        if (len < 0 || (size_t)len >= sizeof path) { ok = false; break; }
+        XcdeFileInfo fi;
+        if (!xcde_utf8_file_info(path, &fi) || !fi.isreg || fi.size > (16ull << 20)) { ok = false; break; }
+        FILE *f = xcde_utf8_fopen(path, "rb");
+        if (!f) { ok = false; break; }
+        uint64_t h = mix(0xcbf29ce484222325ull, e->d_name, n);
+        h = mix_stat(h, fi.size, fi.mtime);
+        uint8_t buf[8192];
+        size_t got;
+        uint64_t total = 0;
+        while ((got = fread(buf, 1, sizeof buf, f)) != 0) { h = mix(h, buf, got); total += got; }
+        ok = !ferror(f) && total == fi.size;
+        fclose(f);
+        if (!ok) break;
+        *sum += h;
+        (*files)++;
     }
     xcde_closedir(dd);
     return ok;
@@ -181,6 +186,13 @@ bool vk_precompile_sig(const char *root, char out[17]) {
         h = mix(h, set ? "1" : "0", 1);
         h = mix(h, v, strlen(v));
         h = mix(h, "|", 1);
+    }
+    if (env_present("XCDE_GLSL_DIR")) {
+        char glsl_dir[1100];
+        const char *dir = xcde_utf8_getenv("XCDE_GLSL_DIR", glsl_dir, sizeof glsl_dir) ? glsl_dir : "";
+        uint64_t overrides = 0;
+        if (!mix_glsl_dir(dir, &h, &overrides)) return false;
+        h = mix(h, &overrides, sizeof overrides);
     }
     uint64_t files = 0;
     if (ri.isdir) {

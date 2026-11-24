@@ -3832,6 +3832,9 @@ typedef struct {
     ShaderKey vkey, fkey;
     PipeKey k;  // (k.prog is NULL in the file)
 } Variant;
+// The on-disk record ABI shared with the offline precompiler. It validates variant files before making any jobs, so a
+// record written by an incompatible build is skipped instead of becoming a pipeline failure on every run.
+size_t vk_precompile_variant_size(void) { return sizeof(Variant); }
 static Variant *var_db;
 static size_t var_n, var_cap;
 static uint64_t var_set[1 << 18];  // hashes of the recorded variants (open addressing; [XCDE] T240: room for the whole game's tours)

@@ -263,26 +263,30 @@ Details and the reporter's log evidence: [CHANGELOG](dev/CHANGELOG.md).
   fingerprint and artifacts revision, the environment switches by presence and value - the SPIR-V options, the
   translator's GLSL switches and the precompile's pass switches -, the game-file set by relative name/size/mtime or the
   `.nup`'s 64-bit size/mtime, the shipped variant seed). A root must be a dump folder with a readable `romfs/` or a
-  `.nup` package file; an unreadable entry inside romfs is skipped like the scan skips it.
+  `.nup` package file; an unreadable directory or entry inside romfs makes the signature unreadable rather than describing
+  a partial scan. `XCDE_GLSL_DIR` override bytes are hashed as well as its path.
 - `runtime/nvn/vulkan/precompile.c`: `sig` line in `cache/precompile_done.txt` (the `exe` line is gone), early exit
   for a current cache, `XCDE_PRECOMPILE_FORCE`, the `--precompile-status` answer and the build workers start after the
   scan (the named-input masks are final then: a deterministic, converging SPIR-V cache).
-- `runtime/host/main_boot.c`: `--precompile-status <dump>` dispatch (exit 0 current / 1 stale / 2 unreadable).
+- `runtime/host/main_boot.c`: `--precompile-status <dump>` dispatch (exit 0 current / 1 stale / 2 unreadable / 3 SPIR-V
+  persistence disabled).
 - `tools/launcher/launcher.cpp`: `pc_done()` asks the runtime with the Diagnostics-tab environment (memoized,
   invalidated when the inputs can change, including a rebuilt executable, the settings and the environment rows; asked
   before the window is shown and never while a run is in flight) instead of comparing the executable; the explicit
   Precompile button passes `XCDE_PRECOMPILE_FORCE=1` (the runtime clears the crash/in-flight lists and redoes the
   passes; a failed spawn cannot lose the stamp) and exit code 2 does not start a doomed run.
-- `tools/gamebuild/gamebuild.py`: `precompile_status` runs the same status command (timeout; 0/1/2 kept apart) and
+- `tools/gamebuild/gamebuild.py`: `precompile_status` runs the same status command (timeout; 0/1/2/3 kept apart) and
   `precompile_is_current` is its `== 0`.
 - `tests/native/test_precompile_sig.c` (new), `scripts/native_tests_linux.sh`, `tests/unit/test_precompile_incremental.py`
   (new), `tests/unit/test_recomplauncher_support.py`, `tests/unit/test_launcher_utf8_paths.py`. The native test builds a
   unique temp root, and covers isolated removal, a same-size mtime-only edit, a plain-file root, a folder without
-  `romfs/`, set-empty vs unset options and one translator/pass switch.
-- Post-merge review fixes: 64-bit Windows pack validation; complete-run-only stamps; RAM-bounded source/decompression and
-  checked thread startup; safe forced-redo ordering; loose-cache completion tracking; game-file-reader and replacement-GLSL
-  headers in the build fingerprint; GPL/patch/cache-mode environment inputs in the runtime signature; honest UNKNOWN status
-  handling and reversible Diagnostics environment rows in the launcher.
+  `romfs/`, set-empty vs unset options, one translator/pass switch and an in-place GLSL override edit. The UTF-8 path
+  native test creates a sparse 3 GiB file and verifies the shared 64-bit metadata helper.
+- Post-merge review fixes: 64-bit Windows pack and game-file metadata; complete-run-only stamps for required scan/base
+  program work while guessed variants, seed records and whole pipelines remain best-effort; RAM-bounded source/decompression
+  and checked thread startup; safe forced-redo ordering; loose-cache completion tracking; game-file-reader and
+  replacement-GLSL headers in the build fingerprint; GPL/patch/cache-mode environment inputs and GLSL override bytes in the
+  runtime signature; honest UNKNOWN/disabled status handling and reversible Diagnostics environment rows in the launcher.
 
 ## 5.1 surround sound output (2026-11-24)
 

@@ -6,11 +6,12 @@ still matches it. Before this, the done stamp named the game executable's size a
 that only touched the launcher, the UI or gameplay code - precompiled all shaders again (a full warm run: the scan,
 every translation and the driver pipeline creation).
 
-The fingerprint covers the sources that decide what the precompiled artifacts are: the game-file discovery/read layer, the
-Maxwell-to-GLSL translator, the GLSL replacement headers used by the build path, the GLSL-to-SPIR-V compiler with its cache
-key and options, the precompile's own program/key guesses (new guesses mean new jobs to warm), the shader content hash the
-precompile duplicates (runtime/nvn/objects.c) and the runtime acceptance of the precompiled SPIR-V
-(runtime/cache_validation.h). It is a whole-file hash, comments included: any edit in those files costs one precompile run,
+The fingerprint covers the sources that decide what the precompiled artifacts are: the game-file discovery/read layer and
+its 64-bit UTF-8 path/directory helpers, the Maxwell-to-GLSL translator, the GLSL replacement headers used by the build
+path, the GLSL-to-SPIR-V compiler with its cache key and options, the precompile's own program/key guesses (new guesses
+mean new jobs to warm), the shader content hash the precompile duplicates (runtime/nvn/objects.c) and the runtime
+acceptance of the precompiled SPIR-V (runtime/cache_validation.h). It is a whole-file hash, comments included: any edit in
+those files costs one precompile run,
 which is the conservative side of the choice. It does not cover the graphics driver (its shader caches are its own; press
 "Precompile shaders" after a driver update) and it deliberately does not cover gameplay code: a runtime change that only
 selects different jobs cannot invalidate what is already warm, it can only make the warm-up less complete until the next
@@ -37,6 +38,8 @@ SOURCES = (
     # The scan reads extracted files or .nup packages through this layer; its title/tree selection decides the shader set.
     'runtime/services/game_files.c',
     'runtime/services/game_files.h',
+    'runtime/host/utf8_path.h',
+    'runtime/platform/dir_utf8.h',
     'runtime/nvn/vulkan/shaders.c',
     'runtime/nvn/vulkan/shaders.h',
     'runtime/nvn/vulkan/vk.h',

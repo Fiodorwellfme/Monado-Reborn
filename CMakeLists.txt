@@ -126,6 +126,7 @@ file(GLOB_RECURSE SHADER_SIG_SOURCES CONFIGURE_DEPENDS
      "${ROOT}/runtime/nvn/maxwell/*" "${ROOT}/runtime/nvn/vulkan/shaders.c" "${ROOT}/runtime/nvn/vulkan/shaders.h"
      "${ROOT}/runtime/nvn/vulkan/vk.h" "${ROOT}/runtime/nvn/vulkan/precompile.c" "${ROOT}/runtime/nvn/objects.c"
      "${ROOT}/runtime/cache_validation.h" "${ROOT}/runtime/services/game_files.c" "${ROOT}/runtime/services/game_files.h"
+     "${ROOT}/runtime/host/utf8_path.h" "${ROOT}/runtime/platform/dir_utf8.h"
      "${ROOT}/runtime/nvn/vulkan/bloom_prefilter.h" "${ROOT}/runtime/nvn/vulkan/bloom.h"
      "${ROOT}/runtime/nvn/vulkan/gtao.h")
 foreach(_sig_source IN LISTS SHADER_SIG_SOURCES)

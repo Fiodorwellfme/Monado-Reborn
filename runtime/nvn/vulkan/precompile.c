@@ -29,8 +29,9 @@
 // Progress: cache/precompile_progress.txt rewritten ~5 times a second ("<phase> <overall done> <overall total> <this
 // pass done> <this pass total>"; [XCDE] T281 made it cover the four passes - before it counted only the scan and the
 // programs and the launcher's bar stood at 100 % through the seed pass and jumped back for the pipelines pass).
-// cache/precompile_done.txt at the end of a complete persistent run (the launcher's "already done" check; loose SPIR-V
-// also has cache/precompile_loose_done.txt, and persistence-disabled runs write neither). cache/precompile_times.txt keeps
+// cache/precompile_done.txt at the end of a persistent run whose scan and base programs completed (optional warmup
+// failures do not block it; the launcher's "already done" check; loose SPIR-V also has cache/precompile_loose_done.txt,
+// and persistence-disabled runs write neither). cache/precompile_times.txt keeps
 // this run's pass durations: the next run weights the bar with them. Threads at below-normal priority.
 // XCDE_PRECOMPILE_THREADS=<n> (default: all logical CPUs but one); XCDE_PRECOMPILE_LIST=<file>: the shader hashes and
 // programs found (tests); XCDE_PRECOMPILE_LIBS=0: SPIR-V only (no Vulkan device, no pipeline libraries);
@@ -109,7 +110,9 @@ static pthread_cond_t fcond = PTHREAD_COND_INITIALIZER;
 static size_t next_job;
 static bool scan_done, use_libs;
 static _Atomic uint64_t n_named_int;  // [XCDE] T211 (programs built with integer inputs named by the container)
-static _Atomic uint64_t n_built, n_failed, n_extra, files_done, n_controls, next_file;
+// n_built/n_failed count required base programs only. Extra/named guesses are best-effort: keep their successes separate
+// and count their failures as optional, so one unsupported guess cannot make every later run rebuild the same cache.
+static _Atomic uint64_t n_built, n_failed, n_extra, n_optional_failed, files_done, n_controls, next_file;
 static _Atomic uint64_t n_build_done, n_scan_failed;  // [review] completion/failures must include every required job
 static _Atomic int abandon;  // [PRECOMPILE-STALL-FIX] set when a phase gives up: the workers take no new job
 static uint64_t files_total;
@@ -293,7 +296,7 @@ static void scan_buf(const uint8_t *d, size_t n) {
 typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-    int inflight, slots;
+    int inflight, slot_inflight, slots;
     uint64_t bytes, limit;
 } ScanBudget;
 static ScanBudget source_budget = {.mutex = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER};
@@ -317,18 +320,20 @@ static void scan_budget_enter(ScanBudget *b, uint64_t size, bool slot_limited) {
     pthread_mutex_lock(&b->mutex);
     // One item is always admitted: on a small-RAM PC it can be larger than the whole budget. Waiting for a byte slot
     // while holding such an item would otherwise deadlock every other scanner. Small source files keep their I/O
-    // overlap and are limited only by bytes; large files and decompressed blocks also obey the slot count.
+    // overlap and are limited only by bytes; only large files and decompressed blocks consume the slot cap.
     while (b->inflight > 0 &&
-           ((slot_limited && b->inflight >= b->slots) ||
+           ((slot_limited && b->slot_inflight >= b->slots) ||
             (size > b->limit || b->bytes > b->limit - size)))
         pthread_cond_wait(&b->cond, &b->mutex);
     b->inflight++;
+    if (slot_limited) b->slot_inflight++;
     b->bytes += size;
     pthread_mutex_unlock(&b->mutex);
 }
-static void scan_budget_leave(ScanBudget *b, uint64_t size) {
+static void scan_budget_leave(ScanBudget *b, uint64_t size, bool slot_limited) {
     pthread_mutex_lock(&b->mutex);
     b->inflight--;
+    if (slot_limited) b->slot_inflight--;
     b->bytes -= size;
     pthread_cond_broadcast(&b->cond);
     pthread_mutex_unlock(&b->mutex);
@@ -359,13 +364,13 @@ static void scan_file(const char *path) {
     uint8_t *d = malloc(n);
     if (!d) {
         scan_failure(path, "source buffer could not be allocated");
-        scan_budget_leave(&source_budget, src.size);
+        scan_budget_leave(&source_budget, src.size, src.size > (64ull << 20));
         return;
     }
     if (gf_pread(&src, d, src.size, 0) != (int64_t)src.size) {
         scan_failure(path, "source could not be read");
         free(d);
-        scan_budget_leave(&source_budget, src.size);
+        scan_budget_leave(&source_budget, src.size, src.size > (64ull << 20));
         return;
     }
     scan_buf(d, n);
@@ -399,11 +404,11 @@ static void scan_file(const char *path) {
             }
             free(x);
         }
-        scan_budget_leave(&xbc1_budget, dsz);
+        scan_budget_leave(&xbc1_budget, dsz, true);
         i += (size_t)0x30 + (csz & ~3u) - 4;
     }
     free(d);
-    scan_budget_leave(&source_budget, src.size);
+    scan_budget_leave(&source_budget, src.size, src.size > (64ull << 20));
 }
 
 // files that hold shaders (measured over the whole RomFS); the monolib containers (title, menus, lighting, post
@@ -425,30 +430,52 @@ static void add_path(const char *p, uint64_t sz) {
 // [XCDE] T280: the same list from the romfs inside a .nup package
 static void list_package(int node, const char *dir) {
     const uint32_t *children;
+    if (node < 0 || !gf_pkg_is_dir(node)) {
+        scan_failure(dir, "package directory is missing or unreadable");
+        return;
+    }
     int count = gf_pkg_children(node, &children);
     for (int i = 0; i < count; i++) {
         int child = (int)children[i];
         char p[1024];
-        snprintf(p, sizeof p, "%s/%s", dir, gf_pkg_name(child));
+        int len = snprintf(p, sizeof p, "%s/%s", dir, gf_pkg_name(child));
+        if (len < 0 || (size_t)len >= sizeof p) {
+            scan_failure(dir, "package path is too long");
+            continue;
+        }
         if (gf_pkg_is_dir(child)) list_package(child, p);
         else if (wanted(gf_pkg_name(child))) {
             GfSource src;  // (a range of the package: its size, for the scan order)
-            add_path(p, gf_source(p, &src) ? src.size : 0);
+            if (!gf_source(p, &src)) scan_failure(p, "source metadata is missing or unreadable");
+            else add_path(p, src.size);
         }
     }
 }
 static void list_dir(const char *dir) {
     XcdeDir *dd = xcde_opendir(dir);
-    if (!dd) return;
+    if (!dd) {
+        int err = errno;
+        char why[128];
+        snprintf(why, sizeof why, "directory could not be opened: %s", strerror(err));
+        scan_failure(dir, why);
+        return;
+    }
     XcdeDirent *e;
     while ((e = xcde_readdir(dd))) {
         if (e->d_name[0] == '.') continue;
         char p[1024];
-        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
-        struct stat sb;
-        if (xcde_utf8_stat(p, &sb)) continue;
-        if (S_ISDIR(sb.st_mode)) list_dir(p);
-        else if (wanted(e->d_name)) add_path(p, (uint64_t)sb.st_size);
+        int len = snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        if (len < 0 || (size_t)len >= sizeof p) {
+            scan_failure(dir, "path is too long");
+            continue;
+        }
+        XcdeFileInfo fi;
+        if (!xcde_utf8_file_info(p, &fi)) {
+            scan_failure(p, "metadata could not be read");
+            continue;
+        }
+        if (fi.isdir) list_dir(p);
+        else if (fi.isreg && wanted(e->d_name)) add_path(p, fi.size);
     }
     xcde_closedir(dd);
 }
@@ -580,7 +607,7 @@ static void build_(const Found *vs, const Found *fs) {
         if (vk_precompile_program(&np, &k, &fkey_guess, NULL)) {
             job_built(vs, fs, &k, &fkey_guess);  // [review] only if built
             atomic_fetch_add(&n_extra, 1);
-        } else atomic_fetch_add(&n_failed, 1);
+        } else atomic_fetch_add(&n_optional_failed, 1);
     }
     // [XCDE] T211: in addition, the versions the container's names point to (they say what CAN be an integer: a
     // draw without that data binds a float format there - measured: names alone missed 170 variants, the guess 25)
@@ -590,19 +617,19 @@ static void build_(const Found *vs, const Found *fs) {
         if (vk_precompile_program(&np, &k, &fkey_guess, NULL)) {
             job_built(vs, fs, &k, &fkey_guess);
             atomic_fetch_add(&n_named_int, 1);
-        } else atomic_fetch_add(&n_failed, 1);
+        } else atomic_fetch_add(&n_optional_failed, 1);
     }
     if (ok && fs && fs->named && fs->int_in) {  // stencil textures: also read as integers
         ShaderKey f = fkey_guess;
         f.tex_uint = fs->int_in;
         bool named_ok = true;
         if (vk_precompile_program(&np, &vkey_guess, &f, NULL)) job_built(vs, fs, &vkey_guess, &f);
-        else { named_ok = false; atomic_fetch_add(&n_failed, 1); }
+        else { named_ok = false; atomic_fetch_add(&n_optional_failed, 1); }
         if (attr & 2) {
             ShaderKey k = vkey_guess;
             k.attr_kind[1] = 2;
             if (vk_precompile_program(&np, &k, &f, NULL)) job_built(vs, fs, &k, &f);
-            else { named_ok = false; atomic_fetch_add(&n_failed, 1); }
+            else { named_ok = false; atomic_fetch_add(&n_optional_failed, 1); }
         }
         if (named_ok) atomic_fetch_add(&n_named_int, 1);
     }
@@ -620,6 +647,7 @@ static _Atomic uint64_t n_seed_built, n_seed_failed;
 static _Atomic size_t n_seed_done;  // [PRECOMPILE-STALL-FIX] seed jobs finished (n_seed_built counts only the successes)
 // [XCDE] T240: and every recorded variant's whole optimized pipeline (exec.c vk_precompile_variant): the shipped list
 // (the debugger tours of every map and cutscene, tools/tours/tour_batch.py) plus the player's own cache/variants.bin
+extern size_t vk_precompile_variant_size(void);
 extern int vk_precompile_variant(const NvnProgram *np, const void *rec, size_t rec_size);
 typedef struct { uint32_t vs, fs; uint8_t *rec; } VarJob;
 static VarJob *var_jobs;
@@ -627,6 +655,12 @@ static size_t nvar, var_rec_size;
 static _Atomic size_t next_var;
 static _Atomic uint64_t n_var_built, n_var_failed;
 static Map var_done;
+static uint64_t optional_built_total(void) {
+    return atomic_load(&n_extra) + atomic_load(&n_named_int) + atomic_load(&n_seed_built) + atomic_load(&n_var_built);
+}
+static uint64_t optional_failed_total(void) {
+    return atomic_load(&n_optional_failed) + atomic_load(&n_seed_failed) + atomic_load(&n_var_failed);
+}
 static void load_seed_file(const char *path, Map *done);
 static void load_seed(void) {
     Map done = {0};
@@ -641,9 +675,25 @@ static void load_seed_file(const char *path, Map *done_) {
     FILE *f = xcde_utf8_fopen(path, "rb");
     if (!f) return;
     uint32_t hdr[2];
-    if (fread(hdr, 4, 2, f) != 2 || hdr[0] != 0x56435843u || hdr[1] < 32 + 2 * sizeof(ShaderKey)) { fclose(f); return; }
-    uint8_t *rec = malloc(hdr[1]);
-    while (fread(rec, hdr[1], 1, f) == 1) {
+    if (fread(hdr, 4, 2, f) != 2 || hdr[0] != 0x56435843u) {
+        printf("[precompile] warning: skipping variant file %s: invalid header%c", path, 10);
+        fclose(f);
+        return;
+    }
+    size_t rec_size = vk_precompile_variant_size();
+    if (hdr[1] != rec_size) {
+        printf("[precompile] warning: skipping incompatible variant file %s: record size %u, expected %zu%c",
+               path, hdr[1], rec_size, 10);
+        fclose(f);
+        return;
+    }
+    uint8_t *rec = malloc(rec_size);
+    if (!rec) {
+        printf("[precompile] warning: skipping variant file %s: record buffer could not be allocated%c", path, 10);
+        fclose(f);
+        return;
+    }
+    while (fread(rec, rec_size, 1, f) == 1) {
         uint64_t h[3];
         memcpy(h, rec, 24);
         if (rec[24]) continue;  // (has_gs)
@@ -842,9 +892,11 @@ static void progress(int pass, bool force) {
         last_print = now;
         double elapsed = (now - t_run) / 1e9;
         double eta = overall > 0.02 ? elapsed * (1.0 - overall) / overall : 0.0;
-        printf("[precompile] %s: %llu/%llu (%.0f%%, ~%.0f s left) - %zu shaders, %zu programs; built %llu, failed %llu, skipped %llu%c",
+        printf("[precompile] %s: %llu/%llu (%.0f%%, ~%.0f s left) - %zu shaders, %zu programs; %llu base programs built, %llu optional variants built, %llu base failures, %llu optional failures, %llu skipped%c",
                pass_name(pass), (unsigned long long)done, (unsigned long long)total, overall * 100.0, eta, nfound, nprogs,
-               (unsigned long long)n_built, (unsigned long long)n_failed, (unsigned long long)n_skipped, 10);
+               (unsigned long long)atomic_load(&n_built), (unsigned long long)optional_built_total(),
+               (unsigned long long)atomic_load(&n_failed), (unsigned long long)optional_failed_total(),
+               (unsigned long long)atomic_load(&n_skipped), 10);
         fflush(stdout);
     }
 }
@@ -869,28 +921,12 @@ static bool spirv_loose_mode(void) {
 }
 static bool spirv_persistence_disabled(void) { return getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL; }
 
-// Windows' struct stat / _wstat64i32 truncates sizes above 2 GiB, which would make a large SPIR-V pack look empty (or
-// fail with EOVERFLOW). Query the wide-opened file's 64-bit size instead; POSIX stat already has a 64-bit off_t.
+// Cache packs can exceed 2 GiB, so use the shared wide/64-bit metadata helper rather than the Windows CRT's stat.
 static bool cache_file_size(const char *path, uint64_t *size) {
-#ifdef _WIN32
-    wchar_t wpath[XCDE_PATH_W];
-    if (xcde_utf8_to_wide(path, wpath, XCDE_PATH_W) < 0) return false;
-    HANDLE h = CreateFileW(wpath, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    BY_HANDLE_FILE_INFORMATION fi;
-    bool ok = GetFileInformationByHandle(h, &fi) != 0 && !(fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
-    LARGE_INTEGER li;
-    if (ok) ok = GetFileSizeEx(h, &li) != 0;
-    CloseHandle(h);
-    if (ok) *size = (uint64_t)li.QuadPart;
-    return ok;
-#else
-    struct stat sb;
-    if (stat(path, &sb) || !S_ISREG(sb.st_mode)) return false;
-    *size = (uint64_t)sb.st_size;
+    XcdeFileInfo fi;
+    if (!xcde_utf8_file_info(path, &fi) || !fi.isreg) return false;
+    *size = fi.size;
     return true;
-#endif
 }
 static bool cache_file_nonempty(const char *path) {
     uint64_t size;
@@ -946,8 +982,10 @@ static bool write_done_stamp(const char *sig, double secs) {
         printf("[precompile] cannot write cache/precompile_done.txt: %s%c", strerror(errno), 10);
         return false;
     }
-    bool ok = fprintf(f, "programs %zu built %llu failed %llu skipped %llu shaders %zu seconds %.0f%c", nprogs,
-                      (unsigned long long)n_built, (unsigned long long)n_failed, (unsigned long long)n_skipped, nfound, secs, 10) >= 0;
+    bool ok = fprintf(f, "programs %zu base_built %llu base_failed %llu optional_built %llu optional_failed %llu skipped %llu shaders %zu seconds %.0f%c",
+                      nprogs, (unsigned long long)atomic_load(&n_built), (unsigned long long)atomic_load(&n_failed),
+                      (unsigned long long)optional_built_total(), (unsigned long long)optional_failed_total(),
+                      (unsigned long long)atomic_load(&n_skipped), nfound, secs, 10) >= 0;
     // [XCDE] T282: the signature of the inputs this run used (runtime/nvn/vulkan/precompile_sig.c). The launcher and
     // RecompLauncher's builder answer "prepared?" by recomputing it (`--precompile-status`), so a rebuild that
     // cannot translate shaders differently keeps the cache. Before T211 this was the executable's size and time,
@@ -962,8 +1000,13 @@ static bool write_done_stamp(const char *sig, double secs) {
 }
 
 // `xcde --precompile-status <dump>`: 0 = the precompiled shaders are current for this build and these game files,
-// 1 = they need preparing, 2 = the game files cannot be read. No cache, Vulkan device or window is touched.
+// 1 = they need preparing, 2 = the game files cannot be read, 3 = SPIR-V persistence is disabled (not applicable).
+// No cache, Vulkan device or window is touched.
 int vk_precompile_status(const char *root) {
+    if (spirv_persistence_disabled()) {
+        printf("[precompile] SPIR-V persistence is disabled (LARECOMP_VK_NO_SPIRV_CACHE): precompilation is not applicable%c", 10);
+        return 3;
+    }
     char sig[17], old[64];
     if (!vk_precompile_sig(root, sig)) {
         printf("[precompile] cannot read the game files under %s: cannot tell whether the precompiled shaders are current%c", root, 10);
@@ -1144,7 +1187,7 @@ int vk_precompile_main(const char *root) {
         }
         for (int i = 0; i < nseed_started; i++) pthread_join(th[i], NULL);
         pass_ms[P_SEED] = (now_ns() - ts0) / 1000000;
-        printf("[precompile] seed: %zu variants, %llu built, %llu failed, %llu already built by the program pass, in %.1f s%c", nseed,
+        printf("[precompile] seed (optional): %zu variants, %llu built, %llu failed, %llu already built by the program pass, in %.1f s%c", nseed,
                (unsigned long long)n_seed_built, (unsigned long long)atomic_load(&n_seed_failed),
                (unsigned long long)atomic_load(&n_seed_reused), pass_ms[P_SEED] / 1000.0, 10);
     }
@@ -1163,7 +1206,7 @@ int vk_precompile_main(const char *root) {
             }
             for (int i = 0; i < npipe_started; i++) pthread_join(th[i], NULL);
             pass_ms[P_PIPE] = (now_ns() - tv0) / 1000000;
-            printf("[precompile] pipelines: %zu recorded variants, %llu built, %llu not (shaders not found / failed) in %.1f s%c", nvar,
+            printf("[precompile] pipelines (optional): %zu recorded variants, %llu built, %llu failed, in %.1f s%c", nvar,
                    (unsigned long long)n_var_built, (unsigned long long)n_var_failed, pass_ms[P_PIPE] / 1000.0, 10);
         }
     }
@@ -1172,13 +1215,24 @@ int vk_precompile_main(const char *root) {
     if (n_skipped) printf("[precompile] %llu jobs skipped (they are on the driver-crash list cache/precompile_skip.txt; press Precompile shaders in the launcher to retry them)\n", (unsigned long long)n_skipped);
     double secs = (now_ns() - t0) / 1e9;
     uint64_t scan_failed = atomic_load(&n_scan_failed), seed_failed = atomic_load(&n_seed_failed);
+    uint64_t pipeline_failed = atomic_load(&n_var_failed), guessed_failed = atomic_load(&n_optional_failed);
+    uint64_t optional_failed = optional_failed_total(), optional_built = optional_built_total();
     printf("[precompile] %zu files, %llu control sections, %zu distinct shaders, %zu programs in %.1f s (scan %.1f s, build %.1f s, seed %.1f s, pipelines %.1f s): "
-           "%llu built (%llu also with integer input 1, %llu more from the container's names), %llu program failures, %llu skipped; %llu SPIR-V compiled, %llu from the cache; %d workers + %d scanners; %llu scan failures, %llu seed failures%c",
+           "%llu base programs built, %llu base program failures; %llu optional variants built (%llu input-1, %llu named, %llu seed, %llu pipelines), "
+           "%llu optional failures (%llu guessed, %llu seed, %llu pipelines), %llu jobs skipped; %llu SPIR-V compiled, %llu from the cache; "
+           "%d workers + %d scanners; %llu scan failures%c",
            npaths, (unsigned long long)n_controls, nfound, nprogs, secs, pass_ms[P_SCAN] / 1000.0, pass_ms[P_BUILD] / 1000.0,
-           pass_ms[P_SEED] / 1000.0, pass_ms[P_PIPE] / 1000.0, (unsigned long long)n_built, (unsigned long long)n_extra,
-           (unsigned long long)n_named_int, (unsigned long long)n_failed, (unsigned long long)n_skipped,
+           pass_ms[P_SEED] / 1000.0, pass_ms[P_PIPE] / 1000.0, (unsigned long long)atomic_load(&n_built),
+           (unsigned long long)atomic_load(&n_failed), (unsigned long long)optional_built, (unsigned long long)atomic_load(&n_extra),
+           (unsigned long long)atomic_load(&n_named_int), (unsigned long long)atomic_load(&n_seed_built),
+           (unsigned long long)atomic_load(&n_var_built), (unsigned long long)optional_failed, (unsigned long long)guessed_failed,
+           (unsigned long long)seed_failed, (unsigned long long)pipeline_failed, (unsigned long long)atomic_load(&n_skipped),
            (unsigned long long)vk_spirv_misses, (unsigned long long)vk_spirv_hits, nthreads, nscanners,
-           (unsigned long long)scan_failed, (unsigned long long)seed_failed, 10);
+           (unsigned long long)scan_failed, 10);
+    if (optional_failed)
+        printf("[precompile] warning: %llu optional builds failed (%llu guessed variants, %llu seed jobs, %llu recorded pipelines); optional work is best-effort and does not by itself invalidate the cache stamp%c",
+               (unsigned long long)optional_failed, (unsigned long long)guessed_failed, (unsigned long long)seed_failed,
+               (unsigned long long)pipeline_failed, 10);
     char list_env[1100];
     const char *list = xcde_utf8_getenv("XCDE_PRECOMPILE_LIST", list_env, sizeof list_env) ? list_env : NULL;
     if (list) {  // (tests: "S <hash> <stage>" per shader, "P <vs hash> <fs hash>" per program)
@@ -1189,12 +1243,11 @@ int vk_precompile_main(const char *root) {
                     (unsigned long long)(progs[i].fs != UINT32_MAX ? found[progs[i].fs].hash : 0), 10);
         if (l) fclose(l);
     }
-    // Crash-list skips are deliberate and may remain skipped. Actual scan/program/seed/pipeline failures mean required
-    // work is missing: keep the useful partial caches, but never claim this input signature is current.
-    if (scan_failed || n_failed || seed_failed || n_var_failed) {
-        printf("[precompile] incomplete run: %llu scan failures, %llu program failures, %llu seed failures, %llu pipeline failures; no current cache stamp was written%c",
-               (unsigned long long)scan_failed, (unsigned long long)n_failed, (unsigned long long)seed_failed,
-               (unsigned long long)n_var_failed, 10);
+    // Crash-list skips are deliberate and may remain skipped. Only an incomplete scan or a failed required base program
+    // may block the stamp. Extra/named guesses, seed jobs and whole pipelines are best-effort warmup.
+    if (scan_failed || n_failed) {
+        printf("[precompile] incomplete required work: %llu scan failures, %llu base program failures; no current cache stamp was written%c",
+               (unsigned long long)scan_failed, (unsigned long long)atomic_load(&n_failed), 10);
         fflush(stdout);
         _exit(1);
     }

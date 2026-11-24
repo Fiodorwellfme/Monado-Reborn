@@ -221,6 +221,24 @@ int main(void) {
         CHECK(!strcmp(a, b));  // (back to the baseline)
     }
 
+    // XCDE_GLSL_DIR's path is an environment input, but an in-place override edit must invalidate the signature too.
+    CHECK(sig_of("dump", a));
+    char overrides[1200], override_file[1200];
+    path_of(overrides, sizeof overrides, "overrides");
+    path_of(override_file, sizeof override_file, "overrides/test_fs.glsl");
+    CHECK(MKDIR(overrides) == 0);
+    write_file("overrides/test_fs.glsl", "one", 3);
+    CHECK(set_mtime(override_file, 1234567890) == 0);
+    set_env("XCDE_GLSL_DIR", overrides);
+    CHECK(sig_of("dump", a));
+    write_file("overrides/test_fs.glsl", "two", 3);
+    CHECK(set_mtime(override_file, 1234567890) == 0);  // same size and mtime: only the bytes changed
+    CHECK(sig_of("dump", b));
+    CHECK(strcmp(a, b) != 0);
+    clear_env();
+    remove_file("overrides/test_fs.glsl");
+    RMDIR(overrides);
+
     // The shipped variant seed: new recorded variants mean new jobs to warm.
     CHECK(sig_of("dump", a));
     write_file("seed.bin", "a bigger seed file", 18);
@@ -233,6 +251,8 @@ int main(void) {
     CHECK(!vk_precompile_sig(missing, a));
 
     // Clean up (best effort: the test must not leave files behind).
+    remove_file("overrides/test_fs.glsl");
+    RMDIR(overrides);
     remove_file("dump/romfs/e.wimdo");
     remove_file("dump/romfs/c.wishp");
     remove_file("dump/romfs/sub/b.wismt");

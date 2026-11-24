@@ -512,6 +512,8 @@ static const char *const k_en[][2] = {
      "Could not verify the shader cache. PLAY retries; the game can compile shaders as it reaches them."},
     {"No se pudieron leer los archivos del juego; se omitió la precompilación de shaders.",
      "The game files could not be read, so shader precompilation was skipped."},
+    {"La persistencia de SPIR-V está desactivada (LARECOMP_VK_NO_SPIRV_CACHE): la precompilación no se aplica y el juego compila los shaders al jugar.",
+     "SPIR-V persistence is disabled (LARECOMP_VK_NO_SPIRV_CACHE): precompilation does not apply and the game compiles shaders while you play."},
     {"La precompilación falló (registro: build/last_precompile.log)", "Precompilation failed (log: build/last_precompile.log)"},
     {"No hay nada que reportar todavía (ni logs ni xcde.ini)", "Nothing to report yet (no logs or xcde.ini)"},
     {"No se pudo crear el reporte (falta tar.exe de Windows)", "Could not create the report (Windows' tar.exe is missing)"},
@@ -1053,7 +1055,7 @@ static std::string g_pc_text;
 // to be redone after every build. CURRENT and STALE are memoized; UNKNOWN is kept distinct and retried after a short
 // backoff (or immediately by PLAY), never reported as prepared. pc_forget drops the memo when the executable, game
 // files, settings or environment rows may have changed.
-enum { PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNREADABLE, PC_STATUS_UNKNOWN };
+enum { PC_STATUS_CURRENT, PC_STATUS_STALE, PC_STATUS_UNREADABLE, PC_STATUS_DISABLED, PC_STATUS_UNKNOWN };
 static constexpr Uint64 PC_UNKNOWN_RETRY_MS = 5000;
 static int g_pc_current = -1;  // -1: not asked yet; otherwise one of PC_STATUS_*
 static Uint64 g_pc_retry_at;
@@ -1074,8 +1076,9 @@ static void pc_check_exe() {
 }
 
 // [XCDE] T282: the runtime's answer. 0/1 are "current" / "needs preparing"; 2 means the game files cannot be read;
-// anything else (including a spawn failure, timeout or unexpected exit) is UNKNOWN. Neither UNREADABLE nor UNKNOWN
-// starts a precompile that cannot be verified; the game can still compile shaders as it reaches them.
+// 3 means SPIR-V persistence is disabled, so precompilation is not applicable; anything else (including a spawn
+// failure, timeout or unexpected exit) is UNKNOWN. UNREADABLE, DISABLED and UNKNOWN never start a precompile that
+// cannot be verified; the game can still compile shaders as it reaches them.
 static int pc_status_now() {
     apply_env();  // [XCDE] T282 review: the signature covers xcde_env.ini options: ask with the same env pc_start uses
     if (!exists(GAME_EXE)) return PC_STATUS_UNKNOWN;  // (no executable yet: the builder makes it; there is nothing to verify)
@@ -1106,7 +1109,8 @@ static int pc_status_now() {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     if (!answered) return PC_STATUS_UNKNOWN;
-    return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE : PC_STATUS_UNKNOWN;
+    return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE :
+           code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN;
 #else
     pid_t pid = spawn_logged({path(GAME_EXE), "--precompile-status", "targets"}, log, false);
     if (!pid) return PC_STATUS_UNKNOWN;  // (cannot ask it: do not start a precompile that would fail the same way)
@@ -1115,7 +1119,8 @@ static int pc_status_now() {
         if (waitpid(pid, &st, WNOHANG) == pid) {
             if (!WIFEXITED(st)) return PC_STATUS_UNKNOWN;
             int code = WEXITSTATUS(st);
-            return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE : PC_STATUS_UNKNOWN;
+            return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE :
+                   code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN;
         }
         SDL_Delay(100);
     }
@@ -1149,6 +1154,7 @@ static const char *pc_idle_text(int status) {
     switch (status) {
     case PC_STATUS_CURRENT: return T("Listo. Guardado: save/   Ajustes: xcde.ini");
     case PC_STATUS_UNREADABLE: return T("No se pudieron leer los archivos del juego; se omitió la precompilación de shaders.");
+    case PC_STATUS_DISABLED: return T("La persistencia de SPIR-V está desactivada (LARECOMP_VK_NO_SPIRV_CACHE): la precompilación no se aplica y el juego compila los shaders al jugar.");
     case PC_STATUS_UNKNOWN: return T("No se pudo verificar la caché de shaders. JUGAR reintenta; el juego puede compilarlos según los necesita.");
     default: return T("Listo. La primera vez, JUGAR prepara los shaders antes (unos minutos)");
     }
@@ -1337,7 +1343,8 @@ static void pc_poll() {
         return;  // (pc_start kept its spawn error and finalized then_play)
     }
     retries = 0;
-    if (code == 0 && (status == PC_STATUS_UNKNOWN || status == PC_STATUS_UNREADABLE)) g_status = pc_idle_text(status);
+    if (code == 0 && (status == PC_STATUS_UNKNOWN || status == PC_STATUS_UNREADABLE || status == PC_STATUS_DISABLED))
+        g_status = pc_idle_text(status);
     else g_status = verified ? T("Shaders precompilados") : T("La precompilación falló (registro: build/last_precompile.log)");
     if (g_pc_then_play) g_pc_play_now = true;
 }
@@ -2082,6 +2089,8 @@ static void tab_home() {
             "Preparados para este build y estos archivos del juego. Algunas zonas aún pueden necesitar variantes adicionales.");
     else if (pc == PC_STATUS_UNREADABLE)
         ImGui::TextWrapped("%s", T("No se pudieron leer los archivos del juego; se omitió la precompilación de shaders."));
+    else if (pc == PC_STATUS_DISABLED)
+        ImGui::TextWrapped("%s", pc_idle_text(pc));
     else if (pc == PC_STATUS_UNKNOWN)
         ImGui::TextWrapped("%s", T("No se pudo verificar la caché de shaders. JUGAR reintenta; el juego puede compilarlos según los necesita."));
     else
