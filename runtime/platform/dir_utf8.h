@@ -30,19 +30,7 @@
 
 // [XCDE] T278: the CRT's opendir() set errno (fs.c's OpenDirectory reports it to the game). FindFirstFileW does not, so
 // map its error the same way (a path that names a file is ERROR_DIRECTORY).
-static inline void xcde_dir_errno_from_win32(DWORD error) {
-    switch (error) {
-    case ERROR_FILE_NOT_FOUND:
-    case ERROR_PATH_NOT_FOUND:
-    case ERROR_INVALID_NAME: errno = ENOENT; break;
-    case ERROR_ACCESS_DENIED:
-    case ERROR_SHARING_VIOLATION: errno = EACCES; break;
-    case ERROR_DIRECTORY: errno = ENOTDIR; break;
-    case ERROR_NOT_ENOUGH_MEMORY:
-    case ERROR_OUTOFMEMORY: errno = ENOMEM; break;
-    default: errno = EIO; break;
-    }
-}
+static inline void xcde_dir_errno_from_win32(DWORD error) { xcde_errno_from_win32(error); }
 #else
 #include <dirent.h>
 #endif

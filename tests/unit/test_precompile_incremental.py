@@ -206,9 +206,10 @@ class RuntimeContracts(unittest.TestCase):
         self.assertIn('if (!dd)', listing)
         self.assertIn('scan_failure(dir, why)', listing)  # opendir/enumeration failure
         self.assertIn('if (!xcde_utf8_file_info(p, &fi))', listing)
-        # A shader container (or a directory that could contain one) must be readable; an unrelated dangling link is skipped.
-        self.assertIn('if (e->d_type == DT_DIR || wanted(e->d_name)) scan_failure(p, "metadata could not be read")', listing)
-        self.assertIn('skipping unreadable entry %s: not a shader container', listing)
+        # Only an entry proven irrelevant is skipped; DT_UNKNOWN, EACCES and shader containers/directories stay fatal.
+        self.assertIn('vk_precompile_entry_skippable(e->d_name, e->d_type, err)', listing)
+        self.assertIn('metadata could not be read: %s', listing)
+        self.assertIn('skipping dangling entry %s: %s', listing)
         self.assertIn('if (fi.isdir) list_dir(p)', listing)
         self.assertIn('else if (fi.isreg && wanted(e->d_name)) add_path(p, fi.size)', listing)
         self.assertIn('static bool wanted(const char *name) { return vk_precompile_is_shader_container(name); }', precompile)
@@ -233,6 +234,28 @@ class RuntimeContracts(unittest.TestCase):
         # The two walks must not disagree again (a path the signature accepts but the listing rejects never stamps).
         signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
         self.assertNotIn('char p[2048], r[2048]', signature)
+
+    def test_only_proven_dangling_entries_are_skipped(self):
+        signature = (ROOT / 'runtime/nvn/vulkan/precompile_sig.c').read_text(encoding='utf-8')
+        classifier = signature[signature.index('bool vk_precompile_entry_skippable('):
+                               signature.index('\n}', signature.index('bool vk_precompile_entry_skippable(')) + 2]
+        self.assertIn('vk_precompile_is_shader_container(name)', classifier)
+        self.assertIn('d_type == DT_DIR || d_type == DT_UNKNOWN', classifier)
+        self.assertIn('err == ENOENT || err == ENOTDIR', classifier)
+        self.assertIn('bool vk_precompile_entry_skippable(', (ROOT / 'runtime/nvn/vulkan/precompile_sig.h').read_text(encoding='utf-8'))
+
+    def test_glsl_overrides_are_regular_files_read_completely(self):
+        exec_code = (ROOT / 'runtime/nvn/vulkan/exec.c').read_text(encoding='utf-8')
+        helper = exec_code[exec_code.index('static char *read_glsl_override('):
+                           exec_code.index('static void compile_program(', exec_code.index('static char *read_glsl_override('))]
+        self.assertIn('xcde_utf8_file_info(path, &fi)', helper)
+        self.assertIn('!fi.isreg', helper)
+        self.assertIn('fseek(f, 0, SEEK_END) == 0', helper)
+        self.assertIn('(uint64_t)n == fi.size', helper)
+        self.assertIn('fseek(f, 0, SEEK_SET) == 0', helper)
+        self.assertIn('fread(buf, 1, (size_t)n, f) == (size_t)n', helper)
+        self.assertIn('if (glsl_dir && *glsl_dir)', exec_code)  # set-but-empty is no override directory, as in the signature
+        self.assertEqual(exec_code.count('read_glsl_override(glsl_dir,'), 2)
 
     def test_variant_files_must_match_the_exec_record_abi_before_jobs_are_created(self):
         precompile = (ROOT / 'runtime/nvn/vulkan/precompile.c').read_text(encoding='utf-8')

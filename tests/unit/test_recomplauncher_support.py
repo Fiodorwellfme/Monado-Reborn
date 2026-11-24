@@ -393,12 +393,16 @@ class SourceContracts(unittest.TestCase):
         self.assertIn('if (then_play) g_pc_play_now = true;', start)
         self.assertIn('return false;', start)
         self.assertIn('return true;', start)
-        self.assertIn('if (fresh) pc_forget();', start)  # (re-ask under the current diagnostics environment)
-        self.assertIn('if (pc_status() == PC_STATUS_DISABLED)', start)  # (the --shot path must not run a no-stamp pass)
+        self.assertIn('if (pc_persistence_disabled())', start)  # (the --shot path must not run a no-stamp pass)
         self.assertIn('g_status = pc_idle_text(PC_STATUS_DISABLED);', start)
+        self.assertNotIn('pc_status()', start)  # a manual run must not block on a full status walk
         self.assertIn('if (pc_start(false, true) && retry)', launcher)
         self.assertIn('if (pc_start(then_play))', launcher)
-        self.assertIn('frame_pc_status == PC_STATUS_DISABLED', launcher)  # (the explicit button is disabled)
+        self.assertIn('pc_persistence_disabled()', launcher)  # (the explicit button uses the applied environment)
+        diagnostics = launcher[launcher.index('static void tab_diagnostics() {'):
+                               launcher.index('static void make_report() {')]
+        self.assertIn('ImGui::IsItemDeactivatedAfterEdit()', diagnostics)
+        self.assertIn('pc_env_changed();', diagnostics)  # (a row edit invalidates the memo without a status walk)
 
     def test_the_shader_precompile_bar_covers_the_four_passes(self):
         # T281: the progress file is "<phase> <overall done> <overall total> <this pass done> <this pass total>" over

@@ -5,6 +5,7 @@
 // no entries (GitHub #218). These wrappers convert the path to UTF-16, the encoding Windows stores paths in, and call
 // the wide API; on other systems they are the libc call they replace.
 #pragma once
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,6 +29,22 @@ typedef struct { bool isdir, isreg; uint64_t size; int64_t mtime; } XcdeFileInfo
 
 // UTF-16 code units for one path: MAX_PATH is 260 and the wide Win32 APIs accept longer paths than the narrow ones.
 #define XCDE_PATH_W 1024
+
+// Win32 error -> errno, for the helpers that report failures through errno (a missing path, not every failure, is safe
+// to treat as "this entry does not exist").
+static inline void xcde_errno_from_win32(DWORD error) {
+    switch (error) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+    case ERROR_INVALID_NAME: errno = ENOENT; break;
+    case ERROR_ACCESS_DENIED:
+    case ERROR_SHARING_VIOLATION: errno = EACCES; break;
+    case ERROR_DIRECTORY: errno = ENOTDIR; break;
+    case ERROR_NOT_ENOUGH_MEMORY:
+    case ERROR_OUTOFMEMORY: errno = ENOMEM; break;
+    default: errno = EIO; break;
+    }
+}
 
 // UTF-8 -> UTF-16 into out (cap code units, terminator included). Returns the units written without the terminator,
 // or -1 when it does not fit. out == NULL with cap == 0 returns the needed length (as snprintf does). Bytes that are
@@ -152,14 +169,15 @@ static inline void *xcde_utf8_load_library(const char *path) { return dlopen(pat
 static inline bool xcde_utf8_file_info(const char *path, XcdeFileInfo *out) {
 #ifdef _WIN32
     wchar_t wpath[XCDE_PATH_W];
-    if (!path || !out || xcde_utf8_to_wide(path, wpath, XCDE_PATH_W) < 0) return false;
+    if (!path || !out) { errno = EINVAL; return false; }
+    if (xcde_utf8_to_wide(path, wpath, XCDE_PATH_W) < 0) { errno = ENAMETOOLONG; return false; }
     HANDLE h = CreateFileW(wpath, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    if (h == INVALID_HANDLE_VALUE) return false;
+    if (h == INVALID_HANDLE_VALUE) { xcde_errno_from_win32(GetLastError()); return false; }
     BY_HANDLE_FILE_INFORMATION fi;
     bool ok = GetFileInformationByHandle(h, &fi) != 0;
     CloseHandle(h);
-    if (!ok) return false;
+    if (!ok) { errno = EIO; return false; }
     out->isdir = (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     out->isreg = !out->isdir && !(fi.dwFileAttributes & FILE_ATTRIBUTE_DEVICE);
     out->size = ((uint64_t)fi.nFileSizeHigh << 32) | fi.nFileSizeLow;
@@ -170,7 +188,8 @@ static inline bool xcde_utf8_file_info(const char *path, XcdeFileInfo *out) {
     return true;
 #else
     struct stat sb;
-    if (!path || !out || stat(path, &sb)) return false;
+    if (!path || !out) { errno = EINVAL; return false; }
+    if (stat(path, &sb)) return false;
     out->isdir = S_ISDIR(sb.st_mode);
     out->isreg = S_ISREG(sb.st_mode);
     out->size = (uint64_t)sb.st_size;

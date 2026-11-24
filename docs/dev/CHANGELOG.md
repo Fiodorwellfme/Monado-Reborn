@@ -489,17 +489,22 @@ Review follow-ups on the two commits above (the Windows runtime is still not exe
   precompilation does not apply and skip the repeated full pass; the explicit Precompile button is disabled and
   `pc_start` refuses to spawn the same no-stamp run.
 - The scan budget has a separate large-file slot counter, so small files no longer delay a `>64 MiB` container. Unreadable
-  shader containers and directories make the signature/scan incomplete instead of being silently skipped; unrelated
-  dangling links are skipped with a warning.
+  shader containers and directories make the signature/scan incomplete instead of being silently skipped. Only entries
+  proven irrelevant are skipped (a known non-directory type and `ENOENT`/`ENOTDIR`, e.g. a dangling mod file); `EACCES`,
+  other errors and `DT_UNKNOWN` stay fatal so an inaccessible subtree cannot be missed.
 - A shared `xcde_utf8_file_info()` helper gives the game-file reader, signature walk, precompile listing and cache validator
   64-bit metadata on Windows. The native UTF-8 path test now creates a sparse 3 GiB file and verifies its reported size.
 - `XCDE_GLSL_DIR` hashes the override `.glsl` bytes as well as the directory path, so in-place debug-shader edits invalidate
-  the precompile signature. Non-regular or unreadable `.glsl` entries are skipped with a warning, matching exec.c,
-  which ignores overrides it cannot read; regular files of any size are hashed.
+  the precompile signature. exec.c now accepts an override only when it is a regular file and seek/tell/read succeed (a
+  directory can be `fopen`ed on Linux and used to look like an empty shader); non-regular or unreadable entries are
+  skipped with a warning, and regular files of any size are hashed.
 - POSIX `xcde_opendir` now checks `readdir`'s error state, so a partial directory listing cannot make the signature or the
   precompile scan look complete. The signature walk and precompile listing share one path limit.
+- Diagnostics environment edits invalidate the memoized precompile status. The explicit Precompile button checks the
+  applied environment directly for `LARECOMP_VK_NO_SPIRV_CACHE`, so it needs no synchronous status walk and re-enables as
+  soon as the variable is removed.
 - A precompile run that finds no shader files but recorded scan failures (a missing/corrupt package `romfs`, for example)
   now exits 2 as unreadable instead of 1 as stale, so the launcher and builder do not retry a doomed run.
-- Validation: 250 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
+- Validation: 252 unit tests, the Linux native suite, focused Clang/GCC signature and sparse-file tests,
   targeted Clang syntax checks for `precompile.c`/`exec.c`, and the Linux launcher syntax check pass. Windows execution is
   still pending; the sparse-file test is included in the Windows validation suite.

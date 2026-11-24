@@ -7,6 +7,7 @@
 #include "../../fast_sync.h"
 #include "../../kernel.h"
 #include "../../platform.h"
+#include "../../host/utf8_path.h"  // (a GLSL override must be a regular file read through the UTF-8 wrappers)
 #include <SDL3/SDL_cpuinfo.h>
 #include <SDL3/SDL_timer.h>
 #include <float.h>
@@ -2507,6 +2508,34 @@ static const char *tmaa_texel_src(uint64_t code, const char *src, char **out_pat
     return buf;
 }
 
+// A debug override is accepted only when it is a regular file and the whole file can be read: fopen() can open a
+// directory on some systems, and a failed seek/tell/short read used to become an empty shader override.
+static char *read_glsl_override(const char *dir, unsigned long long addr, const char *stage, const char *label) {
+    char path[512];
+    int len = snprintf(path, sizeof path, "%s/%llx_%s.glsl", dir, addr, stage);
+    if (len < 0 || (size_t)len >= sizeof path) return NULL;
+    XcdeFileInfo fi;
+    if (!xcde_utf8_file_info(path, &fi) || !fi.isreg) return NULL;
+    FILE *f = xcde_utf8_fopen(path, "rb");
+    if (!f) return NULL;
+    char *buf = NULL;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long n = ftell(f);
+        if (n >= 0 && (uint64_t)n == fi.size && fseek(f, 0, SEEK_SET) == 0) {
+            buf = malloc((size_t)n + 1);
+            if (buf && fread(buf, 1, (size_t)n, f) == (size_t)n) {
+                buf[n] = 0;
+                LOG("[vk] %s shader %llx replaced from %s\n", label, addr, path);
+            } else {
+                free(buf);
+                buf = NULL;
+            }
+        }
+    }
+    fclose(f);
+    return buf;
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     size_t nv = 0, nf = 0;
@@ -2519,29 +2548,16 @@ static void compile_program(void *arg) {
     char *fs_tmaa = NULL;
     { const char *b = tmaa_texel_src(p->src[1], fs_src, &fs_tmaa); if (b) fs_src = b; }
     char *fs_over = NULL;
-    if (getenv("XCDE_GLSL_DIR")) {  // [XCDE] debugging: a hand-edited fragment shader (<dir>/<code addr>_fs.glsl) replaces the translated one
-        char path[512];
-        snprintf(path, sizeof path, "%s/%llx_fs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[1]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-            fs_over = malloc((size_t)n + 1);
-            if (fs_over && fread(fs_over, 1, (size_t)n, f) == (size_t)n) { fs_over[n] = 0; fs_src = fs_over; LOG("[vk] fragment shader %llx replaced from %s\n", (unsigned long long)p->code[1], path); }
-            fclose(f);
-        }
+    const char *glsl_dir = getenv("XCDE_GLSL_DIR");
+    if (glsl_dir && *glsl_dir) {  // [XCDE] debugging: a hand-edited fragment shader (<dir>/<code addr>_fs.glsl) replaces the translated one
+        fs_over = read_glsl_override(glsl_dir, (unsigned long long)p->code[1], "fs", "fragment");
+        if (fs_over) fs_src = fs_over;
     }
     const char *vs_src = p->vi->msl;
     char *vs_over = NULL;
-    if (getenv("XCDE_GLSL_DIR")) {  // [XCDE] the same for vertex shaders (<dir>/<code addr>_vs.glsl)
-        char path[512];
-        snprintf(path, sizeof path, "%s/%llx_vs.glsl", getenv("XCDE_GLSL_DIR"), (unsigned long long)p->code[0]);
-        FILE *f = fopen(path, "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-            vs_over = malloc((size_t)n + 1);
-            if (vs_over && fread(vs_over, 1, (size_t)n, f) == (size_t)n) { vs_over[n] = 0; vs_src = vs_over; LOG("[vk] vertex shader %llx replaced from %s\n", (unsigned long long)p->code[0], path); }
-            fclose(f);
-        }
+    if (glsl_dir && *glsl_dir) {  // [XCDE] the same for vertex shaders (<dir>/<code addr>_vs.glsl)
+        vs_over = read_glsl_override(glsl_dir, (unsigned long long)p->code[0], "vs", "vertex");
+        if (vs_over) vs_src = vs_over;
     }
     unsigned miss0 = vk_spirv_tl_misses;
     uint32_t *sv = vk_glsl_to_spirv(vs_src, STAGE_VERTEX, "vs", &nv);

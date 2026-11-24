@@ -1143,6 +1143,18 @@ static int pc_status(bool force = false) {
     return g_pc_current;
 }
 static bool pc_done(bool force = false) { return pc_status(force) == PC_STATUS_CURRENT; }
+// The runtime treats any presence (including a set-but-empty value) as persistence disabled. This checks the applied
+// environment directly, so the explicit button needs no full status walk and follows a Diagnostics edit immediately.
+static bool pc_persistence_disabled() {
+    std::string value;
+    return env_get_u8("LARECOMP_VK_NO_SPIRV_CACHE", value);  // (set-but-empty also disables persistence)
+}
+// A Diagnostics row is a signature input. Do not keep a verified answer from before the edit, but do not spawn a status
+// walk per keystroke either: STALE/DISABLED is the conservative answer until PLAY or Apply asks the runtime.
+static void pc_env_changed() {
+    g_pc_current = pc_persistence_disabled() ? PC_STATUS_DISABLED : PC_STATUS_STALE;
+    g_pc_retry_at = 0;
+}
 static bool pc_running() {
 #ifdef _WIN32
     return g_pc_proc != NULL;
@@ -1184,8 +1196,7 @@ struct PcForce {
 static bool pc_start(bool then_play, bool fresh = false) {
     apply_env();  // [XCDE] the Diagnostics tab variables also reach the shader precompiler
     if (pc_running()) return false;
-    if (fresh) pc_forget();  // (an explicit redo must re-ask under the current diagnostics environment)
-    if (pc_status() == PC_STATUS_DISABLED) {  // (the button is disabled too; this also guards the --shot path)
+    if (pc_persistence_disabled()) {  // (the button is disabled too; this also guards the --shot path, without a status walk)
         g_status = pc_idle_text(PC_STATUS_DISABLED);
         if (then_play) g_pc_play_now = true;
         return false;
@@ -2115,6 +2126,7 @@ static void tab_diagnostics() {
     ImGui::TextWrapped(T("Se pasan al juego al iniciar. Ejemplo: XCDE_RSC_PIXEL=1 (se aplica la próxima vez que pulses JUGAR)."));
     ImGui::TextDisabled(T("Se guardan en xcde_env.ini (también puedes editarlas ahí)."));
     int focus_row = -1;  // (an existing blank row is reused instead of adding another one)
+    bool env_changed = false;
     ImGui::BeginDisabled(g.nenv >= NENV);
     if (ImGui::Button(T("Añadir variable"))) {
         for (int i = 0; i < g.nenv; i++) if (!g.env[i].name[0]) { focus_row = i; break; }
@@ -2123,6 +2135,7 @@ static void tab_diagnostics() {
             memset(&e, 0, sizeof e);
             focus_row = g.nenv - 1;
         }
+        env_changed = true;
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -2140,9 +2153,11 @@ static void tab_diagnostics() {
             if (i == focus_row) ImGui::SetKeyboardFocusHere();
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputText("##name", g.env[i].name, sizeof g.env[i].name, ImGuiInputTextFlags_CharsNoBlank);
+            if (ImGui::IsItemDeactivatedAfterEdit()) env_changed = true;
             ImGui::TableSetColumnIndex(1);
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputText("##value", g.env[i].value, sizeof g.env[i].value);
+            if (ImGui::IsItemDeactivatedAfterEdit()) env_changed = true;
             ImGui::TableSetColumnIndex(2);
             if (ImGui::SmallButton(T("Quitar"))) remove = i;
             ImGui::PopID();
@@ -2151,7 +2166,12 @@ static void tab_diagnostics() {
         if (remove >= 0) {
             for (int i = remove; i + 1 < g.nenv; i++) g.env[i] = g.env[i + 1];
             g.nenv--;
+            env_changed = true;
         }
+    }
+    if (env_changed) {
+        apply_env();  // (the rows are status/precompile inputs: make the edit effective before the next action)
+        pc_env_changed();
     }
     if (!g.nenv) ImGui::TextDisabled(T("No hay variables de entorno."));
     bool bad_name = false;
@@ -3055,8 +3075,7 @@ int main(int argc, char **argv) {
         ImGui::PopStyleColor(3);
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc ||
-                             frame_pc_status == PC_STATUS_DISABLED);
+        ImGui::BeginDisabled(pc_running() || gc_running() || !have_exe || *g_mismatch_desc || pc_persistence_disabled());
         if (ImGui::Button(T("Precompilar shaders"))) {  // [XCDE] T281: also retries the jobs on the crash skip list
             bool retry = exists("cache/precompile_skip.txt");
             if (pc_start(false, true) && retry) g_status = T("Los trabajos que fallaron se reintentarán en esta pasada (lista de fallidos borrada)");

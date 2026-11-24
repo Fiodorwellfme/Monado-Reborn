@@ -161,6 +161,32 @@ int main(void) {
     remove_file("dump/romfs/broken.txt");
     CHECK(sig_of("dump", b));
     CHECK(!strcmp(a, b));
+
+    // A symlink loop is not a dangling link: stat fails ELOOP, and the walk must stay unreadable.
+    CHECK(make_symlink("loop", "dump/romfs/loop"));
+    CHECK(!sig_of("dump", b));
+    remove_file("dump/romfs/loop");
+
+    // A link into an inaccessible directory is not provably irrelevant either (stat fails EACCES).
+    CHECK(make_dir("locked"));
+    CHECK(make_dir("locked/inner"));
+    char locked[1200], locked_dir[1200];
+    path_of(locked, sizeof locked, "locked/inner");
+    path_of(locked_dir, sizeof locked_dir, "locked");
+    CHECK(make_symlink(locked, "dump/romfs/locked"));
+    if (geteuid() != 0) {
+        CHECK(chmod(locked_dir, 0000) == 0);
+        CHECK(!sig_of("dump", b));
+        CHECK(chmod(locked_dir, 0755) == 0);
+    }
+    remove_file("dump/romfs/locked");
+    {
+        char p[1200];
+        path_of(p, sizeof p, "locked/inner"); RMDIR(p);
+        path_of(p, sizeof p, "locked"); RMDIR(p);
+    }
+    CHECK(sig_of("dump", b));
+    CHECK(!strcmp(a, b));
 #endif
 
     // A changed file (same name, other content/size).
@@ -249,11 +275,11 @@ int main(void) {
     path_of(overrides, sizeof overrides, "overrides");
     path_of(override_file, sizeof override_file, "overrides/test_fs.glsl");
     CHECK(MKDIR(overrides) == 0);
-    CHECK(make_dir("overrides/ignored.glsl"));
+    CHECK(make_dir("overrides/1234_fs.glsl"));  // (the exact runtime override name shape: exec.c must ignore it too)
     write_file("overrides/test_fs.glsl", "one", 3);
     CHECK(set_mtime(override_file, 1234567890) == 0);
 #ifndef _WIN32
-    CHECK(make_symlink("/no/such/target", "overrides/broken.glsl"));
+    CHECK(make_symlink("/no/such/target", "overrides/dead_vs.glsl"));
 #endif
     set_env("XCDE_GLSL_DIR", overrides);
     CHECK(sig_of("dump", a));
@@ -264,11 +290,11 @@ int main(void) {
     clear_env();
     remove_file("overrides/test_fs.glsl");
 #ifndef _WIN32
-    remove_file("overrides/broken.glsl");
+    remove_file("overrides/dead_vs.glsl");
 #endif
     {
         char p[1200];
-        path_of(p, sizeof p, "overrides/ignored.glsl"); RMDIR(p);
+        path_of(p, sizeof p, "overrides/1234_fs.glsl"); RMDIR(p);
     }
     RMDIR(overrides);
 

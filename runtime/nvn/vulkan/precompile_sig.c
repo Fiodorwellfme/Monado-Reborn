@@ -27,8 +27,8 @@
 //    mean new jobs to warm.
 // A root is a dump folder with a readable romfs/ or a .nup package file; anything else is "unreadable" (2), not "stale".
 // An unreadable shader container or directory inside romfs also makes the signature unreadable: a partial walk must not
-// describe a complete cache. An unreadable entry that is neither a shader container nor a directory (a dangling link in
-// a mod, say) is skipped with a warning: it cannot add programs to the shader cache.
+// describe a complete cache. Only an entry proven irrelevant is skipped (a dangling non-container link whose metadata
+// error is ENOENT/ENOTDIR); EACCES, other errors and DT_UNKNOWN stay fatal.
 //
 // Not covered: cache/variants.bin (the player's own recordings: it grows while playing, so it must not invalidate the
 // cache) and the graphics driver, including the Vulkan route / selected adapter from xcde.ini (the driver's shader
@@ -95,10 +95,16 @@ bool vk_precompile_is_shader_container(const char *name) {
     return false;
 }
 
+bool vk_precompile_entry_skippable(const char *name, unsigned char d_type, int err) {
+    if (vk_precompile_is_shader_container(name)) return false;
+    if (d_type == DT_DIR || d_type == DT_UNKNOWN) return false;  // (could be a directory: its contents matter)
+    return err == ENOENT || err == ENOTDIR;  // (a dangling link or a path with a missing/non-directory component)
+}
+
 // Every file under dir, by relative name (rel): added to *sum, so the folder enumeration order does not matter. An
 // unreadable shader container or directory makes the signature unreadable rather than silently describing an incomplete
-// scan; an unreadable non-container entry (a dangling mod link) is skipped, since the scan never reads it. The depth cap
-// turns a symlink loop into "unreadable" instead of a stack exhaustion.
+// scan; only an entry proven irrelevant (a dangling non-container link) is skipped. The depth cap turns a symlink loop
+// into "unreadable" instead of a stack exhaustion.
 #define MIX_DIR_MAX_DEPTH 64
 static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, uint64_t *files) {
     if (depth > MIX_DIR_MAX_DEPTH) return false;
@@ -113,8 +119,9 @@ static bool mix_dir(const char *dir, const char *rel, int depth, uint64_t *sum, 
         if (np < 0 || (size_t)np >= sizeof p || nr < 0 || (size_t)nr >= sizeof r) { ok = false; break; }
         XcdeFileInfo fi;
         if (!xcde_utf8_file_info(p, &fi)) {
-            if (e->d_type == DT_DIR || vk_precompile_is_shader_container(e->d_name)) { ok = false; break; }
-            fprintf(stderr, "[precompile] skipping unreadable entry %s: not a shader container%c", p, 10);
+            int err = errno;
+            if (!vk_precompile_entry_skippable(e->d_name, e->d_type, err)) { ok = false; break; }
+            fprintf(stderr, "[precompile] skipping dangling entry %s: %s%c", p, strerror(err), 10);
             continue;
         }
         if (fi.isdir) {

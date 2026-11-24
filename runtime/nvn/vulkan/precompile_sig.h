@@ -13,6 +13,12 @@
 // the shader cache and is skipped, so an unrelated dangling mod link does not disable shader precompilation.
 bool vk_precompile_is_shader_container(const char *name);
 
+// Whether an entry whose metadata could not be read (err is the metadata error, d_type its directory entry type) is
+// provably irrelevant and can be skipped. Only a dangling link / missing component (ENOENT or ENOTDIR) with a known
+// non-directory type and a non-container name is safe: EACCES, other errors and DT_UNKNOWN stay fatal, because the entry
+// could be an inaccessible directory that holds shader containers.
+bool vk_precompile_entry_skippable(const char *name, unsigned char d_type, int err);
+
 // Writes 16 lowercase hex digits + NUL. false: the game files are not readable (nothing can be said about the cache).
 // The launcher and gamebuild's setup step must run this with the same environment the game/precompile will get
 // (xcde_env.ini included); the signature covers those options.

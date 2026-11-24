@@ -465,8 +465,14 @@ static void list_dir(const char *dir) {
         }
         XcdeFileInfo fi;
         if (!xcde_utf8_file_info(p, &fi)) {
-            if (e->d_type == DT_DIR || wanted(e->d_name)) scan_failure(p, "metadata could not be read");
-            else printf("[precompile] skipping unreadable entry %s: not a shader container%c", p, 10);
+            int err = errno;
+            if (!vk_precompile_entry_skippable(e->d_name, e->d_type, err)) {
+                char why[128];
+                snprintf(why, sizeof why, "metadata could not be read: %s", strerror(err));
+                scan_failure(p, why);
+            } else {
+                printf("[precompile] skipping dangling entry %s: %s%c", p, strerror(err), 10);
+            }
             continue;
         }
         if (fi.isdir) list_dir(p);
