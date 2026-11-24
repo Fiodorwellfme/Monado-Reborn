@@ -48,10 +48,11 @@ static XcdeFpsMeter fps_meter;
 extern "C" void menu_fps_tick(uint64_t now_ns) { xcde_fps_tick(&fps_meter, now_ns); perf_frame_tick(now_ns); }
 extern "C" void menu_frame_info(uint32_t w, uint32_t h) { perf_game_w = (int)w; perf_game_h = (int)h; }
 static std::mutex q_lock;
-static SDL_Event q[256];
+struct QueuedEvent { SDL_Event e; char text[64]; };
+static QueuedEvent q[256];
 static int q_n;
-static volatile bool open_, want_window, want_size;
-static bool fs_applied = false, fs_init;
+static volatile bool open_, want_window, want_size, want_text_input;
+static bool fs_applied = false, fs_init, text_input_on = false;
 
 static bool is_input(Uint32 t) {
     switch (t) {
@@ -72,7 +73,13 @@ extern "C" bool menu_handle_event(const SDL_Event *e) {
     }
     if (!open_ || !is_input(e->type)) return false;
     std::lock_guard<std::mutex> g(q_lock);
-    if (q_n < 256) q[q_n++] = *e;
+    if (q_n < 256) {
+        QueuedEvent &dst = q[q_n++];
+        dst.e = *e;
+        dst.text[0] = 0;
+        // SDL3's SDL_TextInputEvent::text is a transient pointer valid only during the event poll.
+        if (e->type == SDL_EVENT_TEXT_INPUT && e->text.text) snprintf(dst.text, sizeof dst.text, "%s", e->text.text);
+    }
     return true;
 }
 
@@ -98,6 +105,13 @@ extern "C" void menu_apply_window_requests(void *sdl_window) {
             SDL_SetWindowSize(win, g_window_w, g_window_h);
         }
     }
+    bool need_text = open_ && want_text_input;
+    if (need_text != text_input_on) {
+        SDL_Window *win = (SDL_Window *)sdl_window;
+        if (need_text) SDL_StartTextInput(win);
+        else SDL_StopTextInput(win);
+        text_input_on = need_text;
+    }
 }
 
 extern "C" void menu_test_open(void) { open_ = true; }
@@ -119,6 +133,9 @@ static ImGuiKey key_of(SDL_Scancode s) {
     case SDL_SCANCODE_SPACE: return ImGuiKey_Space;
     case SDL_SCANCODE_ESCAPE: return ImGuiKey_Escape;
     case SDL_SCANCODE_BACKSPACE: return ImGuiKey_Backspace;
+    case SDL_SCANCODE_DELETE: return ImGuiKey_Delete;
+    case SDL_SCANCODE_HOME: return ImGuiKey_Home;
+    case SDL_SCANCODE_END: return ImGuiKey_End;
     case SDL_SCANCODE_LSHIFT: return ImGuiKey_LeftShift;
     case SDL_SCANCODE_RSHIFT: return ImGuiKey_RightShift;
     case SDL_SCANCODE_LCTRL: return ImGuiKey_LeftCtrl;
@@ -145,16 +162,16 @@ static ImGuiKey pad_key(Uint8 b) {
 
 // Events queued by the main thread -> ImGui IO (render thread). Mouse positions: window points -> pixels.
 static void feed(ImGuiIO &io, uint32_t w, uint32_t h) {
-    SDL_Event ev[256];
+    QueuedEvent ev[256];
     int n;
     {
         std::lock_guard<std::mutex> g(q_lock);
         n = q_n;
-        memcpy(ev, q, sizeof(SDL_Event) * n);
+        memcpy(ev, q, sizeof(QueuedEvent) * n);
         q_n = 0;
     }
     for (int i = 0; i < n; i++) {
-        const SDL_Event &e = ev[i];
+        const SDL_Event &e = ev[i].e;
         float sx = 1, sy = 1;
         SDL_Window *win = SDL_GetWindowFromID(e.motion.windowID);
         if (win) {
@@ -176,7 +193,7 @@ static void feed(ImGuiIO &io, uint32_t w, uint32_t h) {
             if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_KEY_DOWN);
             break;
         }
-        case SDL_EVENT_TEXT_INPUT: io.AddInputCharactersUTF8(e.text.text); break;
+        case SDL_EVENT_TEXT_INPUT: if (ev[i].text[0]) io.AddInputCharactersUTF8(ev[i].text); break;
         case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: {
             ImGuiKey k = pad_key(e.gbutton.button);
             if (k != ImGuiKey_None) io.AddKeyEvent(k, e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
@@ -658,6 +675,7 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
     if (open_) ui();
+    want_text_input = open_ && io.WantTextInput;
     perf_overlay_draw(show_counter, font_h / 16.0f, w, h);  // [XCDE] GitHub #39: simple / detailed (perf_overlay.h)
     if (!hint_done && !open_) launch_hint(font_h / 16.0f, now);
     ImGui::Render();

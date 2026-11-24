@@ -122,5 +122,14 @@ int main(int argc, char **argv) {
     g_settings.audio_channels = AUDIO_OUT_SURROUND_51; settings_save();
     g_settings.audio_channels = AUDIO_OUT_AUTO; settings_load();
     assert(g_settings.audio_channels == AUDIO_OUT_SURROUND_51);
+    // [XCDE] custom FPS and early limiter mode round-trip
+    g_settings.fps = 72; g_settings.fps_limiter = FPS_LIMITER_EARLY; settings_save();
+    g_settings.fps = 30; g_settings.fps_limiter = FPS_LIMITER_DEFAULT; settings_load();
+    assert(g_settings.fps == 72 && g_settings.fps_limiter == FPS_LIMITER_EARLY);
+    g_settings.fps = 40; g_settings.fps_limiter = FPS_LIMITER_DEFAULT; settings_save();
+    g_settings.fps = 60; g_settings.fps_limiter = FPS_LIMITER_EARLY; settings_load();
+    assert(g_settings.fps == 40 && g_settings.fps_limiter == FPS_LIMITER_DEFAULT);
+    g_settings.fps = 0; settings_save(); g_settings.fps = 30; settings_load();
+    assert(g_settings.fps == 0);
     assert(!remove(argv[1])); puts("settings round-trip: stable GPU ID, policies, 1.5x, window size, unknown keys and default reset OK"); return 0;
 }

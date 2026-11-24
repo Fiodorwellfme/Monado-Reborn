@@ -17,14 +17,19 @@
 #include "../hle.h"
 #include "../platform.h"
 #include "../settings.h"
+#include "../fps_limiter.h"
 #include "../kernel.h"
 #include "../frame_clock.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 // [XCDE] T249: one sample per guest frame, independent of presentation/FG and selected FPS.
 static XcdeFrameClock xcde_clock;
 uint64_t xcde_frame_now_ns(void) { return kernel_det() ? kernel_vnow(0) : plat_now_ns(); }
 uint32_t xcde_frame_threshold_current(uint32_t n) { return xcde_frame_threshold(&xcde_clock, n); }
-RT_ON_RESET(xcde_clock_reset) { memset(&xcde_clock, 0, sizeof xcde_clock); }
+static XcdeEarlyLimiter early_lim;
+RT_ON_RESET(xcde_clock_reset) { memset(&xcde_clock, 0, sizeof xcde_clock); xcde_early_limiter_reset(&early_lim); }
 
 extern volatile uint64_t g_vsync_count;  // runtime/hle/vi.c
 uint64_t g_frame_steps_late;             // (stats) frames that advanced more than one step
@@ -127,12 +132,51 @@ bool xcde_cutscene_unquantize(void) {
 // the frame rate the window is presented at (device.c repeat presents): 30 while a cutscene is held at 30
 int xcde_present_fps(void) { return g_cut30 ? 30 : g_settings.fps; }
 
+// [XCDE] RTSS / MangoHud "early" style host limiter: paces before the next frame's input & simulation
+// using a fixed-cadence deadline with a single high-resolution sleep + short spin-wait.
+static bool early_limiter_active(void) {
+    if (diag_deterministic()) return false;
+    if (ENV("XCDE_FPS_INTERVAL") || ENV("XCDE_FPS_PERIOD_SCALE")) return false;
+    static int env_ov = -2;
+    if (env_ov == -2) {
+        const char *e = ENV("XCDE_FPS_LIMITER");
+        env_ov = e ? xcde_fps_limiter_parse(e) : -1;
+    }
+    int mode = env_ov >= 0 ? env_ov : g_settings.fps_limiter;
+    return mode == FPS_LIMITER_EARLY;
+}
+
+static inline void early_spin_pause(void) {
+#if defined(_WIN32)
+    YieldProcessor();
+#elif defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile("pause" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ volatile("yield" ::: "memory");
+#endif
+}
+
+static void early_limiter_pace(void) {
+    if (!early_limiter_active()) {
+        xcde_early_limiter_reset(&early_lim);
+        return;
+    }
+    int target = xcde_present_fps();
+    uint64_t now = plat_now_ns();
+    uint64_t wake = xcde_early_limiter_step(&early_lim, now, target);
+    if (!wake) return;
+    const uint64_t spin_margin_ns = 1000000ull;  // sleep until 1.0 ms before deadline, then spin for sub-50 us precision
+    if (wake > now + spin_margin_ns) plat_sleep_until_ns(wake - spin_margin_ns);
+    while (plat_now_ns() < wake) early_spin_pause();
+    g_limiter_slept_ns += plat_now_ns() - now;
+}
+
 // [XCDE] live: the FPS option is read every frame (F1 menu changes apply without a restart). Back to 30 the game's
 // interval and limiter constant are handed back (interval 2, the original constant) and the game chooses again.
 static float fps_limiter_original;
 static bool fps_limiter_saved;
 static void fps_interval_force(void) {
-    static int want = -2, fps_was = -1;
+    static int want = -2, fps_was = -1, lim_was = -1;
     static float scale = -1;
     static uint64_t after, after_frames, frames;
     if (want == -2) {
@@ -140,21 +184,29 @@ static void fps_interval_force(void) {
         e = ENV("XCDE_FPS_AFTER_FRAMES"); after_frames = e ? strtoull(e, NULL, 10) : 0;
     }
     int fps = g_settings.fps;
-    if (want == -2 || fps != fps_was) {
+    bool early = early_limiter_active();
+    if (want == -2 || fps != fps_was || (int)early != lim_was) {
         bool first = want == -2;
         int was_want = want;
         const char *e = ENV("XCDE_FPS_INTERVAL");
-        want = e ? atoi(e) : fps == 30 ? -1 : 1;
-        e = ENV("XCDE_FPS_PERIOD_SCALE");
-        scale = e ? (float)atof(e) : fps == 0 ? 0.02f : fps > 60 ? 60.0f / (float)fps : 0;
+        if (early) {
+            // Host early limiter owns pacing; disable the guest's internal spin limiter.
+            want = 1;
+            scale = 0.02f;
+        } else {
+            want = e ? atoi(e) : fps == 30 ? -1 : 1;
+            e = ENV("XCDE_FPS_PERIOD_SCALE");
+            scale = e ? (float)atof(e) : fps == 0 ? 0.02f : (fps != 30 && fps != 60) ? 60.0f / (float)fps : 0;
+        }
         if (!first) {
-            LOG("[fps] FPS option %d -> %d (live)\n", fps_was, fps);
+            LOG("[fps] FPS option %d -> %d (limiter: %s, live)\n", fps_was, fps, early ? "early" : "default");
             uint32_t *p = (uint32_t *)(uintptr_t)*(volatile uint64_t *)(uintptr_t)0x7000b92ea0ull;
             if (want < 0 && was_want >= 0 && p) *p = 2;  // (the game's own 30 fps mode; it picks again from here)
             if (scale <= 0 && fps_limiter_saved)
                 *(volatile float *)(uintptr_t)0x70009d3dccull = fps_limiter_original;
         }
         fps_was = fps;
+        lim_was = (int)early;
     }
     frames++;
     g_cut30 = g_settings.cutscene_mode && !ENV("XCDE_FPS_INTERVAL") && xcde_in_cutscene();
@@ -163,7 +215,8 @@ static void fps_interval_force(void) {
     if (!p) return;
     // T249: use the original period at 30 Hz, rather than rounding 2/scale to an integer
     // (144 Hz used interval 5, yielding 34.72 ms and a different cinematic speed).
-    int target_interval = g_cut30 || want < 0 ? 2 : want;
+    // In early mode, host early_limiter_pace() enforces 30 Hz during g_cut30 instead.
+    int target_interval = (!early && (g_cut30 || want < 0)) ? 2 : want;
     static int logged;
     if (!logged && *p != (uint32_t)want) { logged = 1; LOG("[fps] frame interval %u -> %d\n", *p, want); }
     {   // XCDE_FPS_LOG=1: how often the game set its interval back since the last frame (per 120 frames)
@@ -180,7 +233,7 @@ static void fps_interval_force(void) {
             fps_limiter_original = *k;
             plat_protect((uint64_t)(uintptr_t)k & ~0xFFFull, 0x1000, PLAT_PROT_RW);
         }
-        float desired = fps_limiter_original * (g_cut30 ? 1.0f : scale);
+        float desired = fps_limiter_original * ((!early && g_cut30) ? 1.0f : scale);
         if (*k != desired) { *k = desired; LOG("[fps] limiter period %g (interval %d)\n", (double)*k, target_interval); }
     }
 }
@@ -731,10 +784,11 @@ void xcde_limiter_done(void) {
     statesnap();
     deltafind();
     fps_interval_force();
+    early_limiter_pace();
     menu_clock_update();
     static int on = -1;
     if (on < 0) { const char *e = ENV("XCDE_LIMITER_SLEEP"); on = (!e || atoi(e) != 0) && !diag_deterministic(); }
-    if (!on) return;
+    if (!on || early_limiter_active()) { lim_n = 0; lim_last = 0; return; }
     uint64_t now = plat_now_ns();
     if (lim_turns_since_sleep == 0) lim_n = 0;  // left right after our sleep: we may have overslept - relearn
     lim_turns_since_sleep = -1;
@@ -749,7 +803,7 @@ void xcde_limiter_done(void) {
 void xcde_limiter_spin(void) {
     static int on = -1;
     if (on < 0) { const char *e = ENV("XCDE_LIMITER_SLEEP"); on = (!e || atoi(e) != 0) && !diag_deterministic(); }
-    if (!on || lim_n < 8 || !lim_last) return;
+    if (!on || early_limiter_active() || lim_n < 8 || !lim_last) return;
     if (lim_turns_since_sleep >= 0) lim_turns_since_sleep++;
     uint64_t lo = ~0ull, hi = 0;
     for (int i = 0; i < 8; i++) { if (lim_iv[i] < lo) lo = lim_iv[i]; if (lim_iv[i] > hi) hi = lim_iv[i]; }

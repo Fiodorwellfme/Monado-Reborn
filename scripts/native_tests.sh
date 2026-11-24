@@ -41,6 +41,9 @@ build/test/test_window_size.exe
 # [XCDE] audio output channel policy and 5.1 / stereo mixing (runtime/audio_options.h).
 $Z -std=c11 -Wall -Wextra -Werror -o build/test/test_audio_options.exe tests/native/test_audio_options.c
 build/test/test_audio_options.exe
+# [XCDE] custom FPS bounds/parsing and RTSS / MangoHud early limiter state machine (runtime/fps_limiter.h).
+$Z -std=c11 -Wall -Wextra -Werror -o build/test/test_fps_limiter.exe tests/native/test_fps_limiter.c
+build/test/test_fps_limiter.exe
 # [XCDE] T277: GitHub #218 - a non-ASCII folder through the UTF-8 path wrappers (utf8_path.h).
 $Z -std=c11 -Wall -Wextra -Werror -o build/test/test_utf8_paths.exe tests/native/test_utf8_paths.c
 build/test/test_utf8_paths.exe build/test
