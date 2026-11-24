@@ -428,9 +428,9 @@ void plat_print_backtrace(void) {
         Dl_info di = {0};
         if (!dladdr(bt[i], &di)) di.dli_fname = NULL;
         bool ours = di.dli_fbase && di.dli_fbase == self.dli_fbase;
-        const char *s = plat_symbol(pc, &off);
-        if (!s && ours) s = rt_host_fn_name(pc, &off);
         const char *mod = di.dli_fname ? (strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname) : "?";
+        const char *s = plat_symbol(pc, &off);
+        if (!s && (ours || !strcmp(mod, "lasgame.so"))) s = rt_host_fn_name(pc, &off);
         uint64_t moff = pc - (uint64_t)(uintptr_t)di.dli_fbase;
         if (s && ours) rt_logf("  #%-2d %016llx %s+%llx (lasrecomp+%llx)\n", i, (unsigned long long)pc, s,
                                (unsigned long long)off, (unsigned long long)moff);

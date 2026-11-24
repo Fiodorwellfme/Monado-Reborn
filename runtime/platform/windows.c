@@ -605,7 +605,7 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
     return name;
 }
 
-const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
+const char *rt_host_sym(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c
 
 void plat_print_backtrace(void) {
     void *bt[64];
@@ -613,8 +613,7 @@ void plat_print_backtrace(void) {
     uint64_t exe = (uint64_t)(uintptr_t)GetModuleHandleA(NULL);
     for (int i = 0; i < n; i++) {
         uint64_t pc = (uint64_t)(uintptr_t)bt[i], off = 0;
-        const char *s = plat_symbol(pc, &off);
-        if (!s) s = rt_host_fn_name(pc, &off);
+        const char *s = rt_host_sym(pc, &off);
         if (s) rt_logf("  #%-2d %016llx %s+%llx\n", i, (unsigned long long)pc, s, (unsigned long long)off);
         else rt_logf("  #%-2d %016llx lasrecomp+%llx\n", i, (unsigned long long)pc,
                      (unsigned long long)(pc - exe));
