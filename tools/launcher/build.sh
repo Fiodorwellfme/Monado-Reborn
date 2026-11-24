@@ -12,5 +12,8 @@ for f in $I/imgui.cpp $I/imgui_draw.cpp $I/imgui_tables.cpp $I/imgui_widgets.cpp
   [ "$f" = tools/launcher/launcher.cpp ] || [ "$f" -nt "$o" ] || [ ! -f "$o" ] || continue
   $Z -c $f -o $o -O2 -march=x86_64_v2 -std=c++17 "-DMONADO_VERSION=\"${MONADO_VERSION:-dev}\"" -I$I -I$I/backends -idirafter $M/include -w || exit 1
 done
+ICON_OBJ=build/launcher/monado_icon.o
+[ -f "$ICON_OBJ" ] && [ "$ICON_OBJ" -nt packaging/windows/monado.ico ] && [ "$ICON_OBJ" -nt tools/build/ico_to_coff.py ] || \
+  .venv/Scripts/python tools/build/ico_to_coff.py packaging/windows/monado.ico "$ICON_OBJ" || exit 1
 $Z -o build/xcde_launcher.exe build/launcher/*.o $M/lib/libSDL3.dll.a $M/lib/libvulkan-1.dll.a -march=x86_64_v2 -Wl,--subsystem,windows -static-libstdc++ 2> build/launcher/link.err
 rc=$?; [ $rc = 0 ] || cat build/launcher/link.err | head -20; exit $rc

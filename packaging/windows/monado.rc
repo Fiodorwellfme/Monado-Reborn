@@ -1,0 +1,4 @@
+// Windows application icon resource for xcde.exe and xcde_launcher.exe.
+// Resource ID 1 is the lowest numeric ID, so Explorer uses it as the executable icon
+// and runtime/ui/monado_icon.h loads it for WM_SETICON / SDL_HINT_WINDOWS_INTRESOURCE_ICON.
+1 ICON "monado.ico"

@@ -16,6 +16,7 @@
 #include "gamelib.h"
 #include "paths.h"
 #include "platform.h"
+#include "ui/monado_icon.h"
 
 static char g_root[1024], g_start[1024], g_exe_dir[1024];
 
@@ -220,10 +221,22 @@ unsigned long long rt_game_files_size(const char *game_dir) {
     return n;
 }
 
-// Window / Dock icon: icon.png shipped next to the exe or in the .app (none for a plain source build).
+// Register the Win32 icon resource ID before SDL_Init(SDL_INIT_VIDEO) creates the window class.
+void rt_window_icon_hints(void) {
+    monado_prepare_window_icon_hints();
+}
+
+// Window / Taskbar / Dock icon: prefer an external icon.png override if shipped, otherwise use
+// the embedded Monado icon (Win32 multi-resolution .ico resource on Windows, embedded PNG elsewhere).
 void rt_window_icon(SDL_Window *w) {
     char p[1100];
-    if (!rt_resource("icon.png", NULL, p, sizeof p)) return;
-    SDL_Surface *s = SDL_LoadPNG(p);
-    if (s) SDL_SetWindowIcon(w, s), SDL_DestroySurface(s);
+    if (rt_resource("icon.png", NULL, p, sizeof p)) {
+        SDL_Surface *s = SDL_LoadPNG(p);
+        if (s) {
+            SDL_SetWindowIcon(w, s);
+            SDL_DestroySurface(s);
+            return;
+        }
+    }
+    monado_apply_window_icon(w);
 }

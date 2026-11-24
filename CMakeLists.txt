@@ -202,15 +202,23 @@ if(WIN32)
               "$<TARGET_OBJECTS:monado_rt>" "$<TARGET_OBJECTS:monado_ui>"
       COMMAND_EXPAND_LISTS VERBATIM)
   endif()
+  # Windows PE resource object (RT_GROUP_ICON ID 1) embedded into both xcde.exe and xcde_launcher.exe
+  set(WIN_ICON_OBJ "${CMAKE_BINARY_DIR}/monado_icon.o")
+  add_custom_command(OUTPUT "${WIN_ICON_OBJ}"
+    COMMAND "${Python3_EXECUTABLE}" tools/build/ico_to_coff.py packaging/windows/monado.ico "${WIN_ICON_OBJ}"
+    DEPENDS tools/build/ico_to_coff.py packaging/windows/monado.ico WORKING_DIRECTORY "${ROOT}" VERBATIM)
+  set_source_files_properties("${WIN_ICON_OBJ}" PROPERTIES EXTERNAL_OBJECT TRUE GENERATED TRUE)
+
   set(GAME_NAME xcde)
   set(GAME_OBJECTS $<TARGET_OBJECTS:monado_rt> $<TARGET_OBJECTS:monado_ui> $<TARGET_OBJECTS:monado_dlss>
-                   $<TARGET_OBJECTS:monado_vma>)
+                   $<TARGET_OBJECTS:monado_vma> "${WIN_ICON_OBJ}")
   if(MONADO_RELEASE)
     list(APPEND GAME_OBJECTS "${RELEASE_EXPORTS}")
   endif()
 
   # tools/launcher/build.sh
   set(LAUNCHER_NAME xcde_launcher)
+  list(APPEND LAUNCHER_SOURCES "${WIN_ICON_OBJ}")
   set(LAUNCHER_FLAGS -O2 ${MARCH} -std=c++17 "SHELL:-idirafter \"${MSYS2_PREFIX}/include\"")
   set(LAUNCHER_WARN_FLAGS -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare -Wno-format-security)
   set(LAUNCHER_LIBS "${MSYS2_PREFIX}/lib/libSDL3.dll.a" "${MSYS2_PREFIX}/lib/libvulkan-1.dll.a")

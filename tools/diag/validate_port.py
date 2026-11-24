@@ -154,6 +154,10 @@ def main():
             if run(Path(source).stem + '_build', [*compiler(True), '-O1', '-std=c++17', '-w', *includes(True), '-c', source, '-o', obj]):
                 objects.append(obj)
         if len(objects) == len(files) + 1:
+            icon_obj = output / 'monado_icon.o'
+            if run('launcher_icon', [sys.executable, str(ROOT / 'tools/build/ico_to_coff.py'),
+                                     str(ROOT / 'packaging/windows/monado.ico'), str(icon_obj)]):
+                objects.append(icon_obj)
             run('launcher_link', [*compiler(True), *objects, *libs, '-static-libstdc++', '-static-libgcc',
                                   '-o', output / 'xcde_launcher.exe', '-Wl,--subsystem,windows'])
     print(f'Logs/artifacts: {output}; failures: {len(failures)}; skipped: {len(skipped)}', flush=True)
