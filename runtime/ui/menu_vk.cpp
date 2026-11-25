@@ -590,6 +590,11 @@ static void ui(void) {
                 xcde_foliage_set_preset(g_settings.grass_lod);
                 quality_before=g_settings;
             }
+            ImGui::SeparatorText(en ? "Startup" : "Inicio");
+            ImGui::Checkbox(en ? "Skip launcher on startup" : "Omitir launcher al iniciar", &g_settings.skip_launcher);
+            ImGui::SetItemTooltip("%s", en
+                ? "Starts the game directly on launch instead of opening the launcher.\nUntick and click Apply to show the launcher again on the next launch."
+                : "Inicia el juego directamente al abrir en lugar de mostrar el launcher.\nDesmárcalo y pulsa Aplicar para volver a mostrar el launcher en el próximo inicio.");
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem(T("GPU / Vulkan"))) {

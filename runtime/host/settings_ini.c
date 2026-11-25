@@ -159,6 +159,7 @@ void settings_load(void) {
         else if (!strcmp(k, "taa")) g_settings.taa_off = atoi(v) == 0;  // [XCDE] taa = 0 removes the game's temporal AA only
         else if (!strcmp(k, "vsync")) g_settings.vsync = atoi(v) != 0;
         else if (!strcmp(k, "launcher_lang")) g_settings.ui_lang = !strcmp(v, "es") ? 0 : 1;
+        else if (!strcmp(k, "skip_launcher")) g_settings.skip_launcher = atoi(v) != 0 || !strcmp(v, "true");
         else if (!strcmp(k, "stick_deadzone")) { int d = atoi(v); g_settings.stick_deadzone = d < 0 ? 0 : d > 30 ? 30 : d; }
         else if (!strcmp(k, "party_switch")) g_party_switch = atoi(v) != 0;  // [XCDE] party mod (runtime/hle/party.c)
         else if (!strcmp(k, "run_speed")) {  // [XCDE] GitHub #100: player movement multiplier
@@ -238,6 +239,7 @@ void settings_save(void) {
     fprintf(f, "vsync = %d\n", g_settings.vsync);
     fprintf(f, "stick_deadzone = %d\n", g_settings.stick_deadzone);
     fprintf(f, "launcher_lang = %s\n", g_settings.ui_lang ? "en" : "es");  // (the launcher's key: kept when the game saves)
+    fprintf(f, "skip_launcher = %d\n", g_settings.skip_launcher);
     fprintf(f, "cutscenes = %s\n", g_settings.cutscene_mode == 1 ? "30" : g_settings.cutscene_mode == 2 ? "30fg" : "same");
     fprintf(f, "gpu_index = %d\ngpu_profile = %s\ngpu_gpl = %s\nocclusion = %s\namd_fix = %s\nsession_fix = %s\ngpu_memory_budget = %d\n",
             g_settings.gpu_index, g_settings.gpu_profile == GPU_PROFILE_COMPATIBILITY ? "compatibility" : "auto",

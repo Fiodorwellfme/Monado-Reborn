@@ -139,6 +139,7 @@ typedef struct {
     bool camera_follow_jump; // [XCDE] T276: the field camera rises with the controlled character's jump (runtime/hle/party.c)
     bool quickstep_slot; // [XCDE] dedicated character-owned Quick Step gem slot (Monado II port, runtime/hle/quickstep_*.c), opt-in
     bool save_slots_99;  // [XCDE] 99 manual save slots (Monado II port, runtime/hle/expanded_saves.c): false = the native three + autosave
+    bool skip_launcher;  // [XCDE] Launch the game directly instead of the launcher (xcde.ini skip_launcher)
 } Settings;
 
 enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
