@@ -38,6 +38,14 @@ static bool host_test;  // (then a real controller is left out: the player's own
 
 // [XCDE] mouse buttons held (SDL_BUTTON_*), and the wheel: a notch is a short press (WHEEL_MS) of what it is bound to
 static uint8_t mouse_down[8];
+// Keep the desktop cursor out of the way while a gamepad is driving the game.
+static bool cursor_hidden;
+static void cursor_set_hidden(bool hidden) {
+    if (cursor_hidden == hidden) return;
+    cursor_hidden = hidden;
+    if (hidden) SDL_HideCursor();
+    else SDL_ShowCursor();
+}
 static _Atomic uint64_t wheel_until[2];  // (SDL ticks, ms: up, down)
 #define WHEEL_MS 90
 static int held_key(int sc) {
@@ -459,6 +467,7 @@ void input_handle_event(const SDL_Event *e) {
         recompute_keyboard();
         break;
     case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:  // [XCDE] mouse: buttons bind like keys
+        if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN) cursor_set_hidden(false);
         mouse_win = SDL_GetWindowFromID(e->button.windowID);
         if (e->button.button < 8) mouse_down[e->button.button] = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN;
         if (e->button.button == SDL_BUTTON_RIGHT && g_mouse_look == 1) mouse_look_set(e->type == SDL_EVENT_MOUSE_BUTTON_DOWN);
@@ -466,6 +475,7 @@ void input_handle_event(const SDL_Event *e) {
         recompute_keyboard();
         break;
     case SDL_EVENT_MOUSE_WHEEL:
+        if (e->wheel.y) cursor_set_hidden(false);
         if (e->wheel.y) {
             int up = (e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y) > 0;
             wheel_until[!up] = SDL_GetTicks() + WHEEL_MS;
@@ -479,6 +489,7 @@ void input_handle_event(const SDL_Event *e) {
         }
         break;
     case SDL_EVENT_MOUSE_MOTION:
+        if (e->motion.xrel || e->motion.yrel) cursor_set_hidden(mouse_looking);
         if (mouse_looking) mouse_dx += (int32_t)(e->motion.xrel * 16), mouse_dy += (int32_t)(e->motion.yrel * 16);
         else if (g_mouse_look == 2) {  // (always: taken back once the mouse moves over the focused game window)
             mouse_win = SDL_GetWindowFromID(e->motion.windowID);
@@ -488,6 +499,7 @@ void input_handle_event(const SDL_Event *e) {
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         memset(mouse_down, 0, sizeof mouse_down);
         mouse_look_set(false);
+        cursor_set_hidden(false);
         recompute_keyboard();
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
@@ -498,6 +510,8 @@ void input_handle_event(const SDL_Event *e) {
         recompute_pad();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        if ((e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) ||
+            (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 8000)) cursor_set_hidden(true);
         recompute_pad();
         // [XCDE] party mod, as Xenoblade 3: hold L2 and press L1 / R1 = the member above / below. (recompute_pad hides L1 /
         // R1 from the game while L2 is held, so the target doesn't change too.)
@@ -860,4 +874,3 @@ HLE_FUNC("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21
     info[1] = h & 1;    // position: left / right
     c->x[0] = RES_OK;   // Result
 }
-
