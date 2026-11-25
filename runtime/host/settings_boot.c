@@ -13,6 +13,7 @@ Settings g_settings = {.fps_overlay = true, .upscaler_auto = true, .upscale_shar
 
 void settings_load(void) { xcde_foliage_configure(g_settings.grass_lod); }
 void settings_save(void) {}
+bool settings_read_game_dump(char *out, size_t cap) { (void)out; (void)cap; return false; }
 int settings_mod_priority(const char *name) { (void)name; return 0x7fffffff; }
 const char *settings_language(void) { return "en-US"; }
 const char *settings_language_name(void) { return "English"; }

@@ -18,6 +18,7 @@
 #include "../kernel.h"
 #include "../paths.h"
 #include "../rt.h"
+#include "../settings.h"
 #include "../services/game_files.h"  // [XCDE] T280
 #include "utf8_path.h"  // [XCDE] T278: UTF-8 paths through the wide APIs
 
@@ -225,7 +226,19 @@ int main(int argc, char **argv) {
     setvbuf(stderr, NULL, _IONBF, 0);
     bool game_opt = argc >= 2 && !strcmp(argv[1], "--game");  // [XCDE] the same dump folder by name, from a launcher
     int first = game_opt ? 2 : 1;
-    if (argc <= first) { rt_logf("usage: xcde_boot [--game] <dump: a folder with exefs/ and romfs/, or a .nup> [seconds]\n"); return 2; }
+    static char ini_dump[1024];
+    static char *ini_argv[2];
+    if (argc <= first) {
+        if (!game_opt && settings_read_game_dump(ini_dump, sizeof ini_dump)) {
+            ini_argv[0] = argv[0];
+            ini_argv[1] = ini_dump;
+            argv = ini_argv;
+            argc = 2;
+        } else {
+            rt_logf("usage: xcde_boot [--game] <dump: a folder with exefs/ and romfs/, or a .nup> [seconds]\n");
+            return 2;
+        }
+    }
     const char *root = argv[first];
     int seconds = argc > first + 1 ? atoi(argv[first + 1]) : 20;
     char abs_root[1024];

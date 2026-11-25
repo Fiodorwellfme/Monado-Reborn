@@ -134,7 +134,7 @@ class SkipLauncherContracts(unittest.TestCase):
         self.assertIn('g.skip_launcher = skip_ui;', launcher)
         self.assertIn('ImGui::BeginDisabled(!gc_ok);', launcher)
         self.assertIn('!*g_mismatch_desc && gc_ready()', launcher)
-        self.assertIn('if (!exists("gamebuild/" GC_LIB)) return false;', launcher)
+        self.assertIn('if (!abs_exists(out + "/" GC_LIB)) return false;', launcher)
 
 
 if __name__ == '__main__':
