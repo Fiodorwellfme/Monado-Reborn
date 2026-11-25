@@ -10,7 +10,12 @@
 #include <SDL3/SDL.h>
 #include <math.h>
 #include <mutex>
+#include <stdio.h>
+#include <string>
 #include <string.h>
+#ifndef _WIN32
+#include <strings.h>
+#endif
 
 #include "imgui.h"
 #include "theme.h"
@@ -45,6 +50,31 @@ float vk_display_hz_cached(void);
 bool tmp_fg_active(void);
 const char *tmp_overlay_info(uint32_t *render_w, uint32_t *render_h, uint32_t *out_w, uint32_t *out_h);
 }
+
+#ifndef _WIN32
+// [XCDE] Resolve a scalable system font through fontconfig. This covers Linux distributions
+// whose font packages install fonts outside the traditional Arch/Debian paths (e.g. Fedora).
+static std::string fc_match_font(const char *pattern) {
+    const std::string cmd = std::string("fc-match -f '%{file}' '") + pattern + "' 2>/dev/null";
+    FILE *pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return {};
+
+    char path[1024];
+    size_t n = fread(path, 1, sizeof(path) - 1, pipe);
+    pclose(pipe);
+    path[n] = '\0';
+    while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r' || path[n - 1] == ' '))
+        path[--n] = '\0';
+
+    if (n < 4) return {};
+    const char *ext = path + n - 4;
+    if (strcasecmp(ext, ".ttf") != 0 && strcasecmp(ext, ".otf") != 0 && strcasecmp(ext, ".ttc") != 0)
+        return {};
+
+    SDL_PathInfo info;
+    return SDL_GetPathInfo(path, &info) ? std::string(path) : std::string();
+}
+#endif
 
 static XcdeFpsMeter fps_meter;
 #include "perf_overlay.h"
@@ -861,26 +891,50 @@ extern "C" void menu_render(void *cmd, uint32_t w, uint32_t h) {
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         font_h = fmaxf(16.0f, h / 1080.0f * 22.0f);
-        {   // [XCDE] the first installed one of these; ImGui asserts (aborts) on a missing font file, so check first.
-            // The Windows path alone made every Linux start abort on its first frame with the FPS counter on.
+        {   // [XCDE] Prefer a fontconfig-resolved scalable font on Linux; retain known paths as fallbacks.
+            // Check paths before loading: older ImGui versions may assert when a requested font is missing.
 #ifdef _WIN32
             static const char *fonts[] = {"C:\\Windows\\Fonts\\segoeui.ttf"};
 #else
-            static const char *fonts[] = {"/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-                                          "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                                          "/usr/share/fonts/liberation/LiberationSans-Regular.ttf"};
+            static bool fc_checked = false;
+            static std::string fc_body;
+            if (!fc_checked) {
+                fc_checked = true;
+                fc_body = fc_match_font("sans-serif:weight=regular");
+            }
+            static const char *fonts[] = {
+                "/usr/share/fonts/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/google-noto-vf/NotoSans[wght].ttf", "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+                "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf"
+            };
 #endif
             ImFont *font = nullptr;
-            for (const char *f : fonts) {
-                FILE *probe = fopen(f, "rb");
-                if (!probe) continue;
-                fclose(probe);
-                if ((font = io.Fonts->AddFontFromFileTTF(f, font_h, nullptr, io.Fonts->GetGlyphRangesDefault()))) {
-                    perf_font_big = io.Fonts->AddFontFromFileTTF(f, font_h * 2.0f, nullptr, io.Fonts->GetGlyphRangesDefault());  // (overlay FPS)
-                    break;
+            const char *font_path = nullptr;
+#ifndef _WIN32
+            if (!fc_body.empty()) {
+                font = io.Fonts->AddFontFromFileTTF(fc_body.c_str(), font_h, nullptr, io.Fonts->GetGlyphRangesDefault());
+                if (font) font_path = fc_body.c_str();
+            }
+#endif
+            if (!font) {
+                for (const char *f : fonts) {
+                    SDL_PathInfo info;
+                    if (!SDL_GetPathInfo(f, &info)) continue;
+                    if ((font = io.Fonts->AddFontFromFileTTF(f, font_h, nullptr, io.Fonts->GetGlyphRangesDefault()))) {
+                        font_path = f;
+                        break;
+                    }
                 }
             }
-            if (!font) io.Fonts->AddFontDefault();
+            if (font_path)
+                perf_font_big = io.Fonts->AddFontFromFileTTF(font_path, font_h * 2.0f, nullptr,
+                                                             io.Fonts->GetGlyphRangesDefault());  // (overlay FPS)
+            else
+                io.Fonts->AddFontDefault();
         }
         // [XCDE] the launcher's look (navy panels, crimson selection, teal accents), as a floating window over the game
         monado_launcher_theme(font_h / 16.0f);
