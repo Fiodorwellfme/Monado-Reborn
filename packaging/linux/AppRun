@@ -4,8 +4,9 @@
 # start, so the launcher and the game keep the repository layout they use everywhere else:
 #   <data>/targets           -> the game dump (exefs/ + romfs/)
 #   <data>/build/linux/monado -> the game executable inside this mount
-#   ./Monado-x86_64.AppImage [dump directory]       launcher
+#   ./Monado-x86_64.AppImage [dump directory]       launcher (or the game directly if xcde.ini has skip_launcher = 1)
 #   ./Monado-x86_64.AppImage --play [dump directory] the game directly
+#   ./Monado-x86_64.AppImage --launcher [dump dir]   force the launcher even when skip_launcher = 1
 #   ./Monado-x86_64.AppImage --game <dump directory or .nup> the game directly, without the targets link (RecompLauncher)
 #   ./Monado-x86_64.AppImage --prepare <builder args> the first-start game code builder (RecompLauncher's setup step)
 # RecompLauncher (recomplauncher.json) unpacks the AppImage into the game's install folder and passes that folder as
@@ -53,12 +54,14 @@ if [ "${1:-}" = --prepare ]; then
 fi
 direct=
 game_opt=
+force_launcher=
 case "${1:-}" in
   --play) direct=1; shift;;
   --game) direct=1; game_opt=1; shift;;
+  --launcher) force_launcher=1; shift;;
 esac
 case "${1:-}" in
-  -h|--help) echo "usage: ${APPIMAGE:-AppRun} [--play | --game <dump directory or .nup> | --prepare <builder args>] [dump directory]"; exit 0;;
+  -h|--help) echo "usage: ${APPIMAGE:-AppRun} [--play | --launcher | --game <dump directory or .nup> | --prepare <builder args>] [dump directory]"; exit 0;;
 esac
 root=${1:-${MONADO_GAME_ROOT:-}}
 if [ "$#" -gt 0 ]; then shift; fi
@@ -96,6 +99,29 @@ elif [ -n "$root" ]; then
 fi
 ln -sfn -- "$appdir/usr/bin/monado" "$data/build/linux/monado"
 cd -- "$data"
+if [ -z "$direct" ] && [ -z "$force_launcher" ]; then
+  ini="${XCDE_INI:-xcde.ini}"
+  if [ -f "$ini" ] && [ -f targets/exefs/main ] && awk -F= '
+    NR == 1 { sub(/^\357\273\277/, "") }
+    {
+      sub(/\r$/, "")
+      k = $1; gsub(/^[ \t]+|[ \t]+$/, "", k)
+      if (k == "skip_launcher") {
+        v = $2; gsub(/^[ \t]+|[ \t]+$/, "", v)
+        val = (v == "1" || v == "true") ? 1 : 0
+      }
+    }
+    END { exit !val }
+  ' "$ini"; then
+    # Release AppImages build libmonado_game.so in the launcher on first run / update; fall back to the launcher if missing or stale.
+    if [ -z "${XCDE_GAMEBUILD_DIR:-}" ] || [ ! -f "$XCDE_GAMEBUILD_DIR/gamelib-id.txt" ] || [ -f "$appdir/usr/bin/libmonado_game.so" ] || (
+      [ -f gamebuild/libmonado_game.so ] && [ -f gamebuild/libmonado_game.so.id ] &&
+      [ "$(tr -d '\r\n ' < gamebuild/libmonado_game.so.id)" = "$(tr -d '\r\n ' < "$XCDE_GAMEBUILD_DIR/gamelib-id.txt")" ]
+    ); then
+      direct=1
+    fi
+  fi
+fi
 if [ -z "$direct" ]; then exec "$appdir/usr/bin/monado-launcher" "$@"; fi
 if [ -n "$game_opt" ]; then exec "$appdir/usr/bin/monado" --game "$dump" "$@"; fi
 [ -f targets/exefs/main ] || { echo "No game dump: pass its directory once (it is remembered)" >&2; exit 2; }

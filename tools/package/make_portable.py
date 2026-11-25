@@ -256,7 +256,7 @@ PLAY_BAT = ('@echo off\r\n'
             'rem Monado: launcher (graphics, scaling, controls, language), then the game.\r\n'
             'rem Portable folder: every DLL is in build\\, nothing outside this folder is needed.\r\n'
             'cd /d "%~dp0"\r\n'
-            'start "" "build\\xcde_launcher.exe"\r\n')
+            'start "" "build\\xcde_launcher.exe" %*\r\n')
 
 
 CLEAN_BAT = '@echo off\r\nrem Monado: borra lo que es de ESTA PC (cache de shaders/pipelines, reportes de crash, logs).\r\nrem Corre esto antes de mover o copiar la carpeta a otra PC. NO toca save\\, xcde.ini / xcde_env.ini ni el juego.\r\ncd /d "%~dp0"\r\necho.\r\necho  Se borrara: cache\\  crash\\  y los .log de build\\\r\necho  (Las partidas en save\\ y los ajustes NO se tocan. En esta PC tendras que volver a pulsar "Precompile shaders".)\r\nchoice /m " Continuar"\r\nif errorlevel 2 exit /b 0\r\nif exist "cache" rmdir /s /q "cache"\r\nif exist "crash" rmdir /s /q "crash"\r\ndel /q "build\\*.log" 2>nul\r\necho.\r\necho  Listo.\r\npause\r\n'

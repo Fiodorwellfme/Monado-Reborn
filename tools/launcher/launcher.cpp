@@ -285,6 +285,7 @@ struct Cfg {
     int hotkey_screenshot = XCDE_KEY_F12;
     int hotkey_hud = XCDE_KEY_F4;
     int ui_lang = 1;            // the launcher's own language: 0 Spanish, 1 English (xcde.ini launcher_lang)
+    bool skip_launcher = false; // [XCDE] Skip launcher on next launch when game code is ready (xcde.ini skip_launcher)
     int icons = 0;              // button prompts: 0 auto (the connected controller, else the keyboard), 1 Switch, 2 Xbox, 3 PlayStation, 4 keyboard
     EnvVar env[NENV] = {};      // [XCDE] environment variables for the game (xcde_env.ini)
     int nenv = 0;
@@ -862,6 +863,7 @@ static void load() {
         else if (!strcmp(k, "mouse_sens")) g.mouse_sens = std::clamp(atoi(v), 1, 100);
         else if (!strcmp(k, "stick_deadzone")) g.stick_deadzone = std::clamp(atoi(v), 0, 30);
         else if (!strcmp(k, "launcher_lang")) g.ui_lang = !strcmp(v, "es") ? 0 : 1;
+        else if (!strcmp(k, "skip_launcher")) g.skip_launcher = atoi(v) != 0 || !strcmp(v, "true");
         else if (!strcmp(k, "mouse_invert")) g.mouse_invert = atoi(v) != 0;
         else if (!strcmp(k, "button_icons") && (i = find(k_icon_ini, 5, v)) >= 0) g.icons = i;
     }
@@ -906,6 +908,7 @@ static bool save() {
     fprintf(f, "party_switch = %d\n", g.party_switch);
     fprintf(f, "quickstep_slot = %d\n", g.quickstep_slot);
     fprintf(f, "save_slots_99 = %d\n", g.save_slots_99);
+    fprintf(f, "skip_launcher = %d\n", g.skip_launcher);
     fprintf(f, "run_speed = %.2f\n", g.run_speed);
     // [XCDE] Monado II cheats: out-of-range multipliers are written as 1.00x, as the game does (settings_ini.c)
 #define SAVE_CHEAT(name, minimum) fprintf(f, "cheat_" #name " = %d\ncheat_" #name "_percent = %d\n", \
@@ -1045,8 +1048,7 @@ static void dump_poll() {
 }
 #endif
 
-static void launch() {
-    if (!save()) { g_status = T("No se pudieron guardar los ajustes"); return; }
+static void launch_game_process() {
     apply_env();  // [XCDE] the variables from the Diagnostics tab (xcde_env.ini); the game inherits them
 #ifdef _WIN32
     std::string exe = path("build/xcde.exe");
@@ -1083,6 +1085,11 @@ static void launch() {
     g_status = T("Juego iniciado. Registro: build/last_game.log");
     g_launched_ok = true;
 #endif
+}
+
+static void launch() {
+    if (!save()) { g_status = T("No se pudieron guardar los ajustes"); return; }
+    launch_game_process();
 }
 
 // ------------------------------------------------------------------ shader precompilation (T187)
@@ -1492,6 +1499,7 @@ static std::string read_line(const std::string &file) {
 // A library this runtime accepts: gamebuild/<lib>.id (written by the builder) equals the package's gamelib-id.txt.
 static bool gc_ready() {
     if (!gc_available()) return true;
+    if (!exists("gamebuild/" GC_LIB)) return false;
     std::string id = read_line(path("gamebuild/" GC_LIB ".id"));
     return !id.empty() && id == read_line(gc_dir() + "/gamelib-id.txt");
 }
@@ -2183,6 +2191,21 @@ static void tab_home() {
     else
         ImGui::TextWrapped("%s", g.ui_lang ? "Play prepares the shader cache first. Progress can be resumed." :
             "Jugar prepara primero la cache de shaders. El progreso se puede retomar.");
+    {
+        const bool gc_ok = gc_ready();
+        bool skip_ui = gc_ok ? g.skip_launcher : false;
+        ImGui::SeparatorText(g.ui_lang ? "Startup" : "Inicio");
+        ImGui::BeginDisabled(!gc_ok);
+        if (ImGui::Checkbox(g.ui_lang ? "Skip launcher on startup" : "Omitir launcher al iniciar", &skip_ui))
+            g.skip_launcher = skip_ui;
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled | ImGuiHoveredFlags_ForTooltip))
+            ImGui::SetTooltip("%s", !gc_ok
+                ? (g.ui_lang ? "Build the game code first (click Play once) before enabling this option."
+                             : "Prepara primero el código del juego (pulsa Jugar una vez) antes de activar esta opción.")
+                : (g.ui_lang ? "Starts the game directly on launch instead of opening the launcher.\nTo open the launcher again, untick this option in the in-game F1 menu (Start + Select on gamepad) and click Apply, or launch with --launcher."
+                             : "Inicia el juego directamente al abrir en lugar de mostrar el launcher.\nPara volver a abrir el launcher, desmarca esta opción en el menú F1 del juego (Start + Select en mando) y pulsa Aplicar, o inicia con --launcher."));
+    }
     upd_section();  // GitHub #119
 }
 static void make_report();
@@ -3254,6 +3277,8 @@ int main(int argc, char **argv) {
     const char *shot = argc > 2 && !strcmp(argv[1], "--shot") ? argv[2] : NULL;
     int shot_tab = argc > 3 ? atoi(argv[3]) : 0, frame_no = 0;
     bool shot_pc = shot && argc > 4 && !strcmp(argv[4], "precompile");  // (... <tab> precompile: the bar after ~5 s of a run)
+    bool force_launcher = false;
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--launcher")) force_launcher = true;
 #ifdef _WIN32
     g_llog = xcde_utf8_fopen((g_root + "\\build\\launcher.log").c_str(), "w");
     SetUnhandledExceptionFilter(crash_filter);
@@ -3261,6 +3286,18 @@ int main(int argc, char **argv) {
     g_llog = xcde_utf8_fopen((g_root + "/build/launcher.log").c_str(), "w");
 #endif
     llog("launcher start, root %s", g_root.c_str());
+    load();
+    check_game_version();  // [XCDE] GitHub #18: refuse launching on another game version's files
+    if (!shot && !force_launcher && g.skip_launcher && exists("targets/exefs/main") && exists(GAME_EXE) &&
+        !*g_mismatch_desc && gc_ready()) {
+        llog("skip_launcher enabled and gamebuild ready: starting game directly");
+        launch_game_process();
+        if (g_launched_ok) {
+            if (g_llog) fclose(g_llog);
+            return 0;
+        }
+        llog("skip_launcher direct launch failed (%s): falling back to launcher window", g_status.c_str());
+    }
     monado_prepare_window_icon_hints();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         llog("SDL_Init with gamepads failed (%s): video only", SDL_GetError());
@@ -3310,8 +3347,6 @@ int main(int argc, char **argv) {
     monado_launcher_theme(scale);
     ImGui_ImplSDL3_InitForSDLRenderer(win, ren);
     ImGui_ImplSDLRenderer3_Init(ren);
-    load();
-    check_game_version();  // [XCDE] GitHub #18: refuse launching on another game version's files
     upd_load();
     // GitHub #119 (in the background). Not when RecompLauncher started us (RECOMPLAUNCHER=1): it installs every new
     // release itself, so a banner sending the player to download one by hand would only confuse them.
