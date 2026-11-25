@@ -872,16 +872,23 @@ static void create_swapchain(void) {
 
 static void recreate_swapchain(void) {
     vkq_drain();  // [XCDE] queued recording must finish before idle / reset
+    extern void tmp_fg_wait_presents(void);
+    tmp_fg_wait_presents();  // [XCDE] GitHub #265: drain FSR 3 FG async presents before device idle / swapchain destroy
     sc_wait_idle(g_vk.dev);
     create_swapchain();
 }
 
 // ================================================================== frames (start screen and game)
 // Acquire semaphores rotate per frame in flight; a slot is reused once the submission that waited on it is done.
+// [XCDE] GitHub #265: present-done semaphores rotate across a deeper ring (DONE_SEMS) rather than per swapchain image
+// index: under FSR 3 frame generation + MAILBOX at high FPS, gameQueue can finish and re-acquire an image before AMD's
+// async presentQueue finishes waiting on that image's previous done_sem (re-signaling a pending binary semaphore wedges
+// the NVIDIA Vulkan driver in kernel mode).
 #define FRAMES 3
-static VkSemaphore acquire_sem[FRAMES], done_sem[8];
+#define DONE_SEMS 16
+static VkSemaphore acquire_sem[FRAMES], done_sem[DONE_SEMS];
 static uint64_t slot_seq[FRAMES];
-static int slot;
+static int slot, done_slot;
 
 static VkSemaphore binary_semaphore(void) {
     VkSemaphoreCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -1010,14 +1017,16 @@ void vk_frame_end(const char *shot_path) {
     if (shot_path || hash_it) save_window_image(cb, &shot);
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     uint32_t img = cur_frame.image;
-    if (!done_sem[img]) done_sem[img] = binary_semaphore();
+    int ds = done_slot;
+    done_slot = (done_slot + 1) % DONE_SEMS;
+    if (!done_sem[ds]) done_sem[ds] = binary_semaphore();
     uint64_t seq = vk_pending_seq();
-    vk_submit_extra(cur_frame.acquired, done_sem[img], VK_NULL_HANDLE);
+    vk_submit_extra(cur_frame.acquired, done_sem[ds], VK_NULL_HANDLE);
     if (!g_repeat_present_active) {
         extern void xcde_present_pace_wait(void);
         xcde_present_pace_wait();
     }
-    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[ds],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     extern void vk_rq_at(const char *where);
     extern const char *volatile g_rq_where;
@@ -1728,16 +1737,34 @@ void vk_shaders_init(void);
 // frames when it starts). Do not register a handler that unloads a vendor SDK (Streamline/DLSS, NGX): dlss.cpp used to
 // atexit its shutdown, which then ran before this one and released the plugins while the render thread was inside
 // dlss_evaluate -- an execute fault in the unloaded code (tests/unit/test_vk_source_contracts.py pins this).
+// [XCDE] GitHub #265: if the GPU or render worker is wedged (e.g. hung inside vkQueuePresentKHR), vkq_drain /
+// sc_wait_idle would block forever and prevent window close from ever reaching plat_terminate(). Bound the wait.
+static void *exit_watchdog_thread(void *p) {
+    (void)p;
+    SDL_Delay(3000);
+    fflush(stdout);
+    fflush(stderr);
+#if defined(_WIN32) || defined(__linux__)
+    plat_terminate();
+#endif
+    return NULL;
+}
+
 static void quick_exit_handler(void) {
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
-    if (trace) LOG("[vk] exit: waiting for the GPU\n");
-    if (g_vk.dev) {
+    extern bool backend_is_stalled(void);
+    if (g_vk.dev && !backend_is_stalled()) {
+        pthread_t wt;
+        if (!pthread_create(&wt, NULL, exit_watchdog_thread, NULL)) pthread_detach(wt);
+        if (trace) LOG("[vk] exit: waiting for the GPU\n");
         vkq_drain();
         sc_wait_idle(g_vk.dev);
         if (trace) LOG("[vk] exit: saving the pipeline cache\n");
         for (int i = 0; i < 500 && atomic_load(&pc_saving); i++) SDL_Delay(10);  // (a periodic save still writing)
         vk_pipeline_cache_save();
+    } else if (g_vk.dev) {
+        LOG("[vk] exit: render worker stalled, terminating immediately\n");
     }
     if (trace) LOG("[vk] exit: terminating\n");
     fflush(stdout);

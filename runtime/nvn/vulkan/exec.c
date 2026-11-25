@@ -9394,6 +9394,13 @@ void backend_stall_report(FILE *f) {
             (unsigned long long)rq_head, (unsigned long long)rq_tail, rq_presents, (unsigned long long)submit_seq,
             (int)atomic_load(&g_jobs_queued), (int)atomic_load(&g_jobs_busy), (int)atomic_load(&g_xlat_queued));
 }
+// [XCDE] GitHub #265: lock-free check used by quick_exit_handler() so closing the window does not block on a wedged GPU.
+bool backend_is_stalled(void) {
+    uint64_t t = g_rq_where_ns;
+    const char *w = g_rq_where;
+    if (!t || !w || !strcmp(w, "idle (queue empty)")) return false;
+    return plat_now_ns() - t > 2000000000ull;
+}
 
 void backend_wait_ticket(uint64_t ticket) {  // (guest threads) the worker has run every job up to that one
     fast_mutex_lock(&rq_lock);

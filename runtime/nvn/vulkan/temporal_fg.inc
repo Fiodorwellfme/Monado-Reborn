@@ -11,6 +11,7 @@
 // (ffx_api/vk/ffx_api_vk.h is C++-only: the declarations used here, as there)
 #define FFX_API_CREATE_CONTEXT_DESC_TYPE_FGSWAPCHAIN_VK 0x40001u
 #define FFX_API_QUERY_DESC_TYPE_FGSWAPCHAIN_FUNCTIONS_VK 0x40005u
+#define FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK 0x40007u
 typedef VkResult (*PFN_vkQueueSubmitFFXAPI)(uint32_t submitCount, const VkSubmitInfo *pSubmits, VkFence fence);
 struct VkQueueInfoFFXAPI { VkQueue queue; uint32_t familyIndex; PFN_vkQueueSubmitFFXAPI submitFunc; };
 struct ffxCreateContextDescFrameGenerationSwapChainVK {
@@ -21,6 +22,9 @@ struct ffxCreateContextDescFrameGenerationSwapChainVK {
     VkAllocationCallbacks *allocator;
     VkSwapchainCreateInfoKHR createInfo;
     struct VkQueueInfoFFXAPI gameQueue, asyncComputeQueue, presentQueue, imageAcquireQueue;
+};
+struct ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK {
+    ffxDispatchDescHeader header;
 };
 typedef VkResult (*PFN_vkCreateSwapchainFFXAPI)(VkDevice, const VkSwapchainCreateInfoKHR *, const VkAllocationCallbacks *, VkSwapchainKHR *, void *);
 typedef void (*PFN_vkDestroySwapchainFFXAPI)(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks *, void *);
@@ -41,11 +45,21 @@ static PFN_vkCreateSwapchainFFXAPI fg_create_fn;
 static PFN_vkDestroySwapchainFFXAPI fg_destroy_fn;
 static PFN_getLastPresentCountFFXAPI fg_present_count;
 static uint64_t fg_frame_id;
-static Img fg_hl;      // the frame without the HUD (window size, swapchain format)
-static bool fg_hl_ok;  // filled for the frame being configured
+// [XCDE] GitHub #265: ring-buffer HUDLessColor across frames in flight so gameQueue does not overwrite it while
+// AMD's async presentQueue is still reading the previous frame's HUDLessColor.
+#define FG_HL_RING 3
+static Img fg_hl[FG_HL_RING];
+static unsigned fg_hl_slot;
+static bool fg_hl_ok;  // active for the frame being configured
 static uint32_t fg_w, fg_h;
 static bool fg_active;
 bool tmp_fg_active(void) { return fg_active; }
+void tmp_fg_wait_presents(void) {
+    if (!fg_active || !fgsc_ctx) return;
+    struct ffxDispatchDescFrameGenerationSwapChainWaitForPresentsVK d = {
+        .header = {.type = FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK}};
+    ffx_dispatch(&fgsc_ctx, &d.header);
+}
 
 // [XCDE] T224: frame generation for the whole game (frame_gen) or only for cutscenes held at 30 (cutscenes = 30fg). The
 // swapchain is made at start either way; fg_on() says whether this frame is generated.
@@ -69,7 +83,7 @@ static void VKAPI_PTR fg_destroy_sc(VkDevice d, VkSwapchainKHR sc, const VkAlloc
 
 static bool fg_context(uint32_t w, uint32_t h) {
     if (fg_ctx && fg_w == w && fg_h == h) return true;
-    if (fg_ctx) { vkDeviceWaitIdle(g_vk.dev); ffx_destroy(&fg_ctx, NULL); fg_ctx = NULL; }
+    if (fg_ctx) { tmp_fg_wait_presents(); vkDeviceWaitIdle(g_vk.dev); ffx_destroy(&fg_ctx, NULL); fg_ctx = NULL; }
     struct ffxCreateBackendVKDesc be = {.header = {.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK},
                                         .vkDevice = g_vk.dev, .vkPhysicalDevice = g_vk.phys, .vkDeviceProcAddr = ffx_proc};
     struct ffxCreateContextDescFrameGeneration cd = {.header = {.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION, .pNext = &be.header},
@@ -157,8 +171,17 @@ static void fg_frame(VkCommandBuffer cb, bool enabled, const TmpCamera *cam, con
     c.allowAsyncWorkloads = false;
     c.generationRect = (struct FfxApiRect2D){0, 0, (int32_t)g_vk.sc_extent.width, (int32_t)g_vk.sc_extent.height};
     c.frameID = fg_frame_id;
-    if (fg_hl_ok && fg_hl.b.image && fg_hl.b.width == g_vk.sc_extent.width && fg_hl.b.height == g_vk.sc_extent.height)
-        c.HUDLessColor = res(&fg_hl, FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM, FFX_API_RESOURCE_USAGE_READ_ONLY);
+    fg_hl_ok = false;
+    if (enabled && !env_int("XCDE_FG_NO_HUDLESS")) {
+        fg_hl_slot = (fg_hl_slot + 1) % FG_HL_RING;
+        Img *hl = &fg_hl[fg_hl_slot];
+        img_make(hl, g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height,
+                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+        if (hl->b.image) {
+            fg_hl_ok = true;
+            c.HUDLessColor = res(hl, FFX_API_SURFACE_FORMAT_B8G8R8A8_UNORM, FFX_API_RESOURCE_USAGE_READ_ONLY);
+        }
+    }
     ffxReturnCode_t r = ffx_configure(&fg_ctx, &c.header);
     if (r != FFX_API_RETURN_OK) { static int n; if (n++ < 5) LOG("[tmp] frame generation configure failed: %u\n", r); }
     if (enabled) {
@@ -193,13 +216,9 @@ static void fg_frame(VkCommandBuffer cb, bool enabled, const TmpCamera *cam, con
 }
 void tmp_fg_idle(VkCommandBuffer cb) { vkq_drain(); fg_frame(cb, false, NULL, NULL, 0, 0, 0, false); }
 
-// exec.c vk_present_draw: where to render this frame without its HUD (NULL: frame generation off, or
-// XCDE_FG_NO_HUDLESS=1). The copy is used from the next configure on: frames keep the same HUD layout from one to the next.
+// post.c vk_present_draw: where to render this frame without its HUD (NULL: frame generation off/idle, or
+// XCDE_FG_NO_HUDLESS=1). Returns the ring slot already configured by fg_frame() for this frame.
 VkImageView tmp_fg_hudless_target(void) {
-    fg_hl_ok = false;
-    if (!fg_active || !fg_on() || env_int("XCDE_FG_NO_HUDLESS")) return VK_NULL_HANDLE;
-    img_make(&fg_hl, g_vk.sc_format, g_vk.sc_extent.width, g_vk.sc_extent.height,
-             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
-    fg_hl_ok = true;
-    return fg_hl.v;
+    if (!fg_active || !fg_on() || !fg_hl_ok || env_int("XCDE_FG_NO_HUDLESS")) return VK_NULL_HANDLE;
+    return fg_hl[fg_hl_slot].v;
 }
