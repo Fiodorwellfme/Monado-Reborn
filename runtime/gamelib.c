@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -36,14 +37,34 @@ static bool exists(const char *p) {
 }
 
 // The places to look, in order (gamelib.h). Returns how many were filled.
-static int candidates(const char *game_dir, char out[5][1100]) {
+static int candidates(const char *game_dir, char out[7][1100]) {
     int n = 0;
     char env[1100];
     if (xcde_utf8_getenv("LARECOMP_GAME_LIB", env, sizeof env)) snprintf(out[n++], 1100, "%s", env);
     char exe_side[1024];
     if (rt_resource(GAMELIB_NAME, NULL, exe_side, sizeof exe_side) && exists(exe_side))
         snprintf(out[n++], 1100, "%s", exe_side);
-    if (game_dir) snprintf(out[n++], 1100, "%s/%s", game_dir, GAMELIB_NAME);
+    if (game_dir && *game_dir) {
+        struct stat st;
+        bool is_file = xcde_utf8_stat(game_dir, &st) == 0 && !S_ISDIR(st.st_mode);
+        if (is_file) {
+            // [XCDE] GitHub #259: a .nup / .nsp file: check gamebuild/ next to the package file, then beside it.
+            char parent[1024];
+            snprintf(parent, sizeof parent, "%s", game_dir);
+            char *s = strrchr(parent, '/'), *b = strrchr(parent, '\\');
+            if (b > s) s = b;
+            if (s) {
+                if (s == parent) s[1] = 0;
+                else *s = 0;
+                snprintf(out[n++], 1100, "%s/gamebuild/%s", parent, GAMELIB_NAME);
+                snprintf(out[n++], 1100, "%s/%s", parent, GAMELIB_NAME);
+            }
+        } else {
+            snprintf(out[n++], 1100, "%s/%s", game_dir, GAMELIB_NAME);
+            // [XCDE] GitHub #259: generated gamebuild folder kept inside the dump folder.
+            snprintf(out[n++], 1100, "%s/gamebuild/%s", game_dir, GAMELIB_NAME);
+        }
+    }
     // Release packages build it once into the writable data folder (tools/gamebuild/gamebuild.py). That is also the working
     // directory the launcher and AppRun enter; rt_data_root() is empty here (rt_paths_init has no caller).
     if (xcde_utf8_getenv("LARECOMP_DATA_ROOT", env, sizeof env)) snprintf(out[n++], 1100, "%s/gamebuild/%s", env, GAMELIB_NAME);
@@ -53,7 +74,7 @@ static int candidates(const char *game_dir, char out[5][1100]) {
 
 bool gamelib_present(const char *game_dir) {
     if (g_tables) return true;
-    char c[5][1100];
+    char c[7][1100];
     int n = candidates(game_dir, c);
     for (int i = 0; i < n; i++)
         if (exists(c[i]) && id_matches(c[i])) return true;
@@ -89,7 +110,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
                  "the game code hasn't been built in %s/gamebuild/%s: start the launcher once so it prepares it from "
                  "your game files",
                  data ? data : ".", GAMELIB_NAME);
-        char c[5][1100];
+        char c[7][1100];
         int n = candidates(game_dir, c);
         const char *env = xcde_utf8_getenv("LARECOMP_GAME_LIB", data_env, sizeof data_env) ? data_env : NULL;
         for (int i = 0; i < n && !g_tables; i++) {

@@ -80,6 +80,7 @@ fi
 mkdir -p -- "$data/build/linux"
 data=$(CDPATH= cd -- "$data" && pwd)
 export LARECOMP_DATA_ROOT="$data"
+dump=
 if [ -n "$game_opt" ] && [ -f "$root" ] && [ "$(head -c 3 -- "$root" 2>/dev/null)" = NUP ]; then
   # [XCDE] T280: --game with a .nup package, read in place by the game (runtime/services/game_files.c). Only --game:
   # the other modes link the dump as targets/, a folder the launcher reads.
@@ -94,10 +95,10 @@ elif [ -n "$root" ]; then
   # --game: no targets link. RecompLauncher moves, backs up and removes the install folder (the data folder there) as
   # a whole, and a link inside it would lead those to the player's own dump.
   if [ -z "$game_opt" ] && [ "$(CDPATH= cd -- "$data/targets" 2>/dev/null && pwd -P)" != "$dump" ]; then
-    ln -sfn -- "$dump" "$data/targets"
+    ln -sfn -- "$dump" "$data/targets" 2>/dev/null || true
   fi
 fi
-ln -sfn -- "$appdir/usr/bin/monado" "$data/build/linux/monado"
+ln -sfn -- "$appdir/usr/bin/monado" "$data/build/linux/monado" 2>/dev/null || true
 cd -- "$data"
 if [ -z "$direct" ] && [ -z "$force_launcher" ]; then
   ini="${XCDE_INI:-xcde.ini}"
@@ -124,5 +125,26 @@ if [ -z "$direct" ] && [ -z "$force_launcher" ]; then
 fi
 if [ -z "$direct" ]; then exec "$appdir/usr/bin/monado-launcher" "$@"; fi
 if [ -n "$game_opt" ]; then exec "$appdir/usr/bin/monado" --game "$dump" "$@"; fi
+if [ -n "$dump" ]; then exec "$appdir/usr/bin/monado" "$dump" "$@"; fi
+# [XCDE] GitHub #259: when launched directly (--play, e.g. Steam Deck Game Mode) without an argument, remember the
+# dump folder/package recorded by the launcher in xcde.ini (works even without a targets/ symlink).
+if [ -f "$data/xcde.ini" ]; then
+  ini_dump=$(awk -F= '
+    NR == 1 { sub(/^\xef\xbb\xbf/, "") }
+    /^[[:space:]]*game_dump[[:space:]]*=/ {
+      v = substr($0, index($0, "=") + 1)
+      gsub(/^[[:space:]]+|[[:space:]\r]+$/, "", v)
+      if (length(v) > 0) val = v
+    }
+    END { if (length(val) > 0) print val }
+  ' "$data/xcde.ini")
+  if [ -n "$ini_dump" ]; then
+    if [ -f "$ini_dump/exefs/main" ] && [ -d "$ini_dump/romfs" ]; then
+      exec "$appdir/usr/bin/monado" "$ini_dump" "$@"
+    elif [ -f "$ini_dump" ] && [ "$(head -c 3 -- "$ini_dump" 2>/dev/null)" = NUP ]; then
+      exec "$appdir/usr/bin/monado" "$ini_dump" "$@"
+    fi
+  fi
+fi
 [ -f targets/exefs/main ] || { echo "No game dump: pass its directory once (it is remembered)" >&2; exit 2; }
 exec "$appdir/usr/bin/monado" targets "$@"

@@ -287,6 +287,8 @@ struct Cfg {
     int ui_lang = 1;            // the launcher's own language: 0 Spanish, 1 English (xcde.ini launcher_lang)
     bool skip_launcher = false; // [XCDE] Skip launcher on next launch when game code is ready (xcde.ini skip_launcher)
     int icons = 0;              // button prompts: 0 auto (the connected controller, else the keyboard), 1 Switch, 2 Xbox, 3 PlayStation, 4 keyboard
+    char game_dump[1024] = "";  // [XCDE] GitHub #259: chosen dump folder or .nup package (xcde.ini game_dump)
+    bool gamebuild_in_dump = false;  // [XCDE] GitHub #259: store generated gamebuild/ in dump folder (or next to .nup/.nsp)
     EnvVar env[NENV] = {};      // [XCDE] environment variables for the game (xcde_env.ini)
     int nenv = 0;
 };
@@ -749,7 +751,7 @@ static void load() {
     FILE *f = xcde_utf8_fopen(path("xcde.ini").c_str(), "r");
     if (!f) return;
     int layout = 1;  // (bind_layout: an older file's keyboard lines are the old layout - the new defaults replace them)
-    char line[512];
+    char line[1200];
     while (fgets(line, sizeof line, f)) {
         char *eq = strchr(line, '=');
         if (!eq || line[0] == '#') continue;
@@ -866,6 +868,8 @@ static void load() {
         else if (!strcmp(k, "skip_launcher")) g.skip_launcher = atoi(v) != 0 || !strcmp(v, "true");
         else if (!strcmp(k, "mouse_invert")) g.mouse_invert = atoi(v) != 0;
         else if (!strcmp(k, "button_icons") && (i = find(k_icon_ini, 5, v)) >= 0) g.icons = i;
+        else if (!strcmp(k, "game_dump")) snprintf(g.game_dump, sizeof g.game_dump, "%s", v);
+        else if (!strcmp(k, "gamebuild_in_dump")) g.gamebuild_in_dump = atoi(v) != 0;
     }
     fclose(f);
     gfx_fold_effects_off(&g.graphics, &g.effects_off);  // [XCDE] the old effect checkboxes -> their Off choices
@@ -949,6 +953,8 @@ static bool save() {
     fprintf(f, "mouse_look = %d\nmouse_sens = %d\nmouse_invert = %d\n", g.mouse_look, g.mouse_sens, g.mouse_invert);
     fprintf(f, "stick_deadzone = %d\nrumble = %d\n", g.stick_deadzone, g.rumble);
     fprintf(f, "launcher_lang = %s\n", g.ui_lang ? "en" : "es");
+    if (g.game_dump[0]) fprintf(f, "game_dump = %s\n", g.game_dump);
+    fprintf(f, "gamebuild_in_dump = %d\n", g.gamebuild_in_dump ? 1 : 0);
     if (xcde_ini_commit(f, tmp, settings_path.c_str()) == 0) return false;
     return save_env();  // [XCDE] the game's environment (xcde_env.ini)
 }
@@ -959,8 +965,43 @@ static bool save() {
 // instead of a window-less game whose log only says "no function at ..." deep in nn::init::Start.
 static char g_mismatch_desc[8] = "";    // "" = ok, else the exefs file that differs ("main" / "sdk")
 static char g_mismatch_got[65], g_mismatch_want[65];
-static bool nso_matches(const char *rel, const char *want, char got[65]) {
-    FILE *f = xcde_utf8_fopen(path(rel).c_str(), "rb");
+static bool abs_exists(const std::string &p) {
+    SDL_PathInfo pi;
+    return !p.empty() && SDL_GetPathInfo(p.c_str(), &pi);
+}
+static bool abs_is_dir(const std::string &p) {
+    SDL_PathInfo pi;
+    return !p.empty() && SDL_GetPathInfo(p.c_str(), &pi) && pi.type == SDL_PATHTYPE_DIRECTORY;
+}
+static bool abs_is_file(const std::string &p) {
+    SDL_PathInfo pi;
+    return !p.empty() && SDL_GetPathInfo(p.c_str(), &pi) && pi.type == SDL_PATHTYPE_FILE;
+}
+static bool is_nup_package(const std::string &p) {
+    if (!abs_is_file(p)) return false;
+    FILE *f = xcde_utf8_fopen(p.c_str(), "rb");
+    if (!f) return false;
+    char magic[4] = {};
+    bool ok = fread(magic, 1, 4, f) == 4 && !memcmp(magic, "NUP\x01", 4);
+    fclose(f);
+    return ok;
+}
+// [XCDE] GitHub #259: effective dump path (chosen in xcde.ini, else targets/ in the data/install folder).
+static std::string effective_dump_dir() {
+    if (g.game_dump[0]) return g.game_dump;
+    return path("targets");
+}
+static std::string effective_dump_arg() {
+    if (g.game_dump[0]) return g.game_dump;
+    return "targets";
+}
+static bool dump_is_valid(const std::string &p) {
+    if (is_nup_package(p)) return true;
+    return abs_exists(p + "/exefs/main") || abs_is_dir(p + "/exefs");
+}
+
+static bool nso_matches(const std::string &full_path, const char *want, char got[65]) {
+    FILE *f = xcde_utf8_fopen(full_path.c_str(), "rb");
     if (!f) return true;  // (the file is missing: the game-files message covers that case)
     uint8_t hdr[0x60];
     bool ok = fread(hdr, 1, sizeof hdr, f) == sizeof hdr && !memcmp(hdr, "NSO0", 4);
@@ -976,17 +1017,19 @@ static bool nso_matches(const char *rel, const char *want, char got[65]) {
     return !memcmp(got, want, strlen(want));
 }
 static void check_game_version() {
+    std::string dump = effective_dump_dir();
+    if (is_nup_package(dump)) return;
 #ifdef XCDE_GAME_MAIN_ID
-    if (exists("targets/exefs/main") && !nso_matches("targets/exefs/main", XCDE_GAME_MAIN_ID,
-                                                     g_mismatch_got)) {
+    std::string main_nso = dump + "/exefs/main";
+    if (abs_exists(main_nso) && !nso_matches(main_nso, XCDE_GAME_MAIN_ID, g_mismatch_got)) {
         snprintf(g_mismatch_desc, sizeof g_mismatch_desc, "main");
         snprintf(g_mismatch_want, sizeof g_mismatch_want, "%s", XCDE_GAME_MAIN_ID);
         return;
     }
 #endif
 #ifdef XCDE_GAME_SDK_ID
-    if (exists("targets/exefs/sdk") && !nso_matches("targets/exefs/sdk", XCDE_GAME_SDK_ID,
-                                                    g_mismatch_got)) {
+    std::string sdk_nso = dump + "/exefs/sdk";
+    if (abs_exists(sdk_nso) && !nso_matches(sdk_nso, XCDE_GAME_SDK_ID, g_mismatch_got)) {
         snprintf(g_mismatch_desc, sizeof g_mismatch_desc, "sdk");
         snprintf(g_mismatch_want, sizeof g_mismatch_want, "%s", XCDE_GAME_SDK_ID);
     }
@@ -995,13 +1038,14 @@ static void check_game_version() {
 
 static std::string g_status;
 static bool g_mod_dirty;
+static bool g_dump_saved;   // [XCDE] GitHub #259: dump_poll() persisted game_dump to xcde.ini; sync saved_cfg
 static bool g_launched_ok;  // (launch() started the game: the launcher closes)
 static float g_scale = 1;
 
-#ifndef _WIN32
-// [XCDE] T-LINUX-DUMP-PICKER: choose the dump folder with the desktop's folder dialog. The game and the launcher read it
-// as targets/ (here a link, which the AppImage's AppRun also maintains): the choice is remembered by that link.
-// A real targets/ folder (a dump copied into the checkout) is never replaced.
+// [XCDE] T-LINUX-DUMP-PICKER & GitHub #259: choose the dump folder with the desktop's folder dialog.
+// Recorded in xcde.ini (`game_dump`) so direct launches (Steam Deck Game Mode, --play, or running the game binary)
+// remember where the dump lives even without the launcher open or without symlinks. On POSIX, targets/ is also kept
+// linked best-effort when targets/ is not a real folder.
 static SDL_Mutex *g_dump_lock;
 static bool g_dump_pending, g_dump_ready;
 static std::string g_dump_selected, g_dump_error;
@@ -1012,7 +1056,6 @@ static void SDLCALL dump_selected(void *, const char *const *files, int) {
     g_dump_ready = true;
     SDL_UnlockMutex(g_dump_lock);
 }
-static void check_game_version();
 static void pc_forget();  // [XCDE] T282: drops the memoized precompile status (defined with the shader precompile below)
 static void dump_poll() {
     if (!g_dump_lock) return;
@@ -1025,6 +1068,7 @@ static void dump_poll() {
     g_dump_pending = false;
     if (!error.empty()) { g_status = error; return; }
     if (chosen.empty()) return;  // (cancel: keep the current dump)
+    while (chosen.size() > 1 && (chosen.back() == '/' || chosen.back() == '\\')) chosen.pop_back();
     SDL_PathInfo pi;
     if (!SDL_GetPathInfo((chosen + "/exefs/main").c_str(), &pi) || !SDL_GetPathInfo((chosen + "/romfs").c_str(), &pi) ||
         pi.type != SDL_PATHTYPE_DIRECTORY) {
@@ -1032,27 +1076,28 @@ static void dump_poll() {
                                "No es un volcado: elige la carpeta que contiene exefs/main y romfs/.";
         return;
     }
+    snprintf(g.game_dump, sizeof g.game_dump, "%s", chosen.c_str());
+#ifndef _WIN32
     std::string link = path("targets");
     struct stat ls;
-    if (lstat(link.c_str(), &ls) == 0 && !S_ISLNK(ls.st_mode)) {
-        g_status = g.ui_lang ? "targets/ is a real folder here: move or rename it to use another dump." :
-                               "targets/ es una carpeta real: muévela o renómbrala para usar otro volcado.";
-        return;
+    if (lstat(link.c_str(), &ls) != 0 || S_ISLNK(ls.st_mode)) {
+        xcde_utf8_remove(link.c_str());
+        (void)symlink(chosen.c_str(), link.c_str());  // best-effort: exFAT/FAT32 SD cards may not support symlinks
     }
-    xcde_utf8_remove(link.c_str());
-    if (symlink(chosen.c_str(), link.c_str()) != 0) { g_status = std::string("Could not link targets/: ") + strerror(errno); return; }
+#endif
+    if (save()) g_dump_saved = true;
     g_mismatch_desc[0] = 0;
     check_game_version();  // [XCDE] GitHub #18: the version check again, for the new files
     pc_forget();  // [XCDE] T282: other game files: the precompiled shader cache is not known to be current any more
-    g_status = g.ui_lang ? "Game dump selected." : "Volcado del juego seleccionado.";
+    g_status = g.ui_lang ? "Game dump selected and saved to xcde.ini." : "Volcado del juego seleccionado y guardado en xcde.ini.";
 }
-#endif
 
 static void launch_game_process() {
     apply_env();  // [XCDE] the variables from the Diagnostics tab (xcde_env.ini); the game inherits them
+    std::string dump_arg = effective_dump_arg();
 #ifdef _WIN32
     std::string exe = path("build/xcde.exe");
-    std::string cmd = "\"" + exe + "\" targets";
+    std::string cmd = "\"" + exe + "\" \"" + dump_arg + "\"";
     // the game's DLLs (SDL3, Vulkan loader, FFmpeg, opus) come from MSYS2
     std::wstring p = WPath(g_root) + L"\\build;C:\\msys64\\ucrt64\\bin;" + env_w(L"PATH");  // [portable] the folder's own DLLs first
     SetEnvironmentVariableW(L"PATH", p.c_str());
@@ -1080,7 +1125,7 @@ static void launch_game_process() {
 #else
     std::string exe = path(GAME_EXE), log = path("build/last_game.log");
     xcde_utf8_rename(log.c_str(), path("build/last_game.prev.log").c_str());  // [XCDE] T260: keep the previous run's log
-    pid_t pid = spawn_logged({exe, "targets"}, log, false);
+    pid_t pid = spawn_logged({exe, dump_arg}, log, false);
     if (!pid) { g_status = std::string("Could not start " GAME_EXE " (") + strerror(errno) + ")"; return; }
     g_status = T("Juego iniciado. Registro: build/last_game.log");
     g_launched_ok = true;
@@ -1150,9 +1195,10 @@ static int pc_status_now() {
     apply_env();  // [XCDE] T282 review: the signature covers xcde_env.ini options: ask with the same env pc_start uses
     if (!exists(GAME_EXE)) return PC_STATUS_UNKNOWN;  // (no executable yet: the builder makes it; there is nothing to verify)
     std::string log = path("build/last_precompile_status.log");
+    std::string dump_arg = effective_dump_arg();
 #ifdef _WIN32
     std::string exe = path(GAME_EXE);
-    std::string cmd = "\"" + exe + "\" --precompile-status targets";
+    std::string cmd = "\"" + exe + "\" --precompile-status \"" + dump_arg + "\"";
     std::wstring p = WPath(g_root) + L"\\build;C:\\msys64\\ucrt64\\bin;" + env_w(L"PATH");  // [portable] the folder's own DLLs first
     SetEnvironmentVariableW(L"PATH", p.c_str());
     STARTUPINFOW si = {};
@@ -1179,7 +1225,7 @@ static int pc_status_now() {
     return code == 0 ? PC_STATUS_CURRENT : code == 1 ? PC_STATUS_STALE : code == 2 ? PC_STATUS_UNREADABLE :
            code == 3 ? PC_STATUS_DISABLED : PC_STATUS_UNKNOWN;
 #else
-    pid_t pid = spawn_logged({path(GAME_EXE), "--precompile-status", "targets"}, log, false);
+    pid_t pid = spawn_logged({path(GAME_EXE), "--precompile-status", dump_arg}, log, false);
     if (!pid) return PC_STATUS_UNKNOWN;  // (cannot ask it: do not start a precompile that would fail the same way)
     int st = 0;
     for (int i = 0; i < 300; i++) {  // (up to 30 s: a game-files walk from a slow disk)
@@ -1278,9 +1324,10 @@ static bool pc_start(bool then_play, bool fresh = false) {
     }
     pc_forget();
     g_pc_t0 = SDL_GetTicks();
+    std::string dump_arg = effective_dump_arg();
 #ifdef _WIN32
     std::string exe = path("build/xcde.exe");
-    std::string cmd = "\"" + exe + "\" --precompile targets";
+    std::string cmd = "\"" + exe + "\" --precompile \"" + dump_arg + "\"";
     std::wstring p = WPath(g_root) + L"\\build;C:\\msys64\\ucrt64\\bin;" + env_w(L"PATH");  // [portable] the folder's own DLLs first
     SetEnvironmentVariableW(L"PATH", p.c_str());
     SDL_CreateDirectory(path("cache").c_str());
@@ -1322,7 +1369,7 @@ static bool pc_start(bool then_play, bool fresh = false) {
     pid_t pid = 0;
     int spawn_err = 0;
     { PcForce force(fresh);  // [review] the child gets XCDE_PRECOMPILE_FORCE=1; a failed spawn leaves the stamps alone
-      pid = spawn_logged({path(GAME_EXE), "--precompile", "targets"}, path("build/last_precompile.log"), true);
+      pid = spawn_logged({path(GAME_EXE), "--precompile", dump_arg}, path("build/last_precompile.log"), true);
       spawn_err = errno; }  // (PcForce's destructor calls setenv/unsetenv and may replace the error)
     if (!pid) {
         g_status = std::string(T("No se pudo iniciar la precompilación (error ")) + strerror(spawn_err) + ")";
@@ -1496,11 +1543,33 @@ static std::string read_line(const std::string &file) {
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' ')) line.pop_back();
     return line;
 }
-// A library this runtime accepts: gamebuild/<lib>.id (written by the builder) equals the package's gamelib-id.txt.
+static std::string g_gc_active_out;  // [XCDE] GitHub #259: output dir of the currently running gamebuild
+// [XCDE] GitHub #259: where generated game code is written/read. Default: <data root>/gamebuild.
+// When gamebuild_in_dump is ticked: <dump folder>/gamebuild (or <parent>/gamebuild next to a .nup/.nsp file).
+static std::string gc_out_dir() {
+    if (g.gamebuild_in_dump) {
+        std::string dump = effective_dump_dir();
+        if (dump_is_valid(dump)) {
+#ifndef _WIN32
+            char resolved[PATH_MAX];
+            if (realpath(dump.c_str(), resolved)) dump = resolved;
+#endif
+            if (abs_is_file(dump)) {
+                size_t slash = dump.find_last_of("/\\");
+                if (slash != std::string::npos) dump = slash == 0 ? "/" : dump.substr(0, slash);
+            }
+            while (dump.size() > 1 && (dump.back() == '/' || dump.back() == '\\')) dump.pop_back();
+            return dump + "/gamebuild";
+        }
+    }
+    return path("gamebuild");
+}
+// A library this runtime accepts: <gc_out_dir>/<lib>.id (written by the builder) equals the package's gamelib-id.txt.
 static bool gc_ready() {
     if (!gc_available()) return true;
-    if (!exists("gamebuild/" GC_LIB)) return false;
-    std::string id = read_line(path("gamebuild/" GC_LIB ".id"));
+    std::string out = gc_out_dir();
+    if (!abs_exists(out + "/" GC_LIB)) return false;
+    std::string id = read_line(out + "/" GC_LIB ".id");
     return !id.empty() && id == read_line(gc_dir() + "/gamelib-id.txt");
 }
 static bool gc_running() {
@@ -1519,10 +1588,11 @@ static bool gc_start(bool then_play) {
                                "El paquete está incompleto: falta build/gamebuild/" GC_TOOL ".";
         return false;
     }
-    SDL_CreateDirectory(path("gamebuild").c_str());
+    std::string root = effective_dump_dir(), out = gc_out_dir(), log = path("build/last_gamebuild.log");
+    SDL_CreateDirectory(out.c_str());
     SDL_CreateDirectory(path("build").c_str());
-    xcde_utf8_remove(path("gamebuild/progress.txt").c_str());
-    std::string root = path("targets"), out = path("gamebuild"), log = path("build/last_gamebuild.log");
+    xcde_utf8_remove((out + "/progress.txt").c_str());
+    g_gc_active_out = out;
 #ifdef _WIN32
     std::string cmd = "\"" + tool + "\" --root \"" + root + "\" --out \"" + out + "\" --resources \"" + gc_dir() + "\"";
     STARTUPINFOW si = {};
@@ -1597,7 +1667,8 @@ static void gc_poll() {
     Uint64 now = SDL_GetTicks();
     if (now - last < 250) return;
     last = now;
-    FILE *f = xcde_utf8_fopen(path("gamebuild/progress.txt").c_str(), "r");
+    std::string prog = (g_gc_active_out.empty() ? gc_out_dir() : g_gc_active_out) + "/progress.txt";
+    FILE *f = xcde_utf8_fopen(prog.c_str(), "r");
     if (f) {
         char phase[24] = "";
         unsigned long long done = 0, total = 0;
@@ -2205,6 +2276,22 @@ static void tab_home() {
                              : "Prepara primero el código del juego (pulsa Jugar una vez) antes de activar esta opción.")
                 : (g.ui_lang ? "Starts the game directly on launch instead of opening the launcher.\nTo open the launcher again, untick this option in the in-game F1 menu (Start + Select on gamepad) and click Apply, or launch with --launcher."
                              : "Inicia el juego directamente al abrir en lugar de mostrar el launcher.\nPara volver a abrir el launcher, desmarca esta opción en el menú F1 del juego (Start + Select en mando) y pulsa Aplicar, o inicia con --launcher."));
+    }
+    ImGui::SeparatorText(g.ui_lang ? "Game files" : "Archivos del juego");
+    {
+        std::string shown_dump = g.game_dump[0] ? std::string(g.game_dump) : path("targets");
+        ImGui::TextDisabled("%s", g.ui_lang ? "Game dump path (remembered in xcde.ini)" : "Ruta del volcado (guardada en xcde.ini)");
+        ImGui::TextWrapped("%s", shown_dump.c_str());
+        ImGui::BeginDisabled(gc_running());
+        if (ImGui::Checkbox(g.ui_lang ? "Store generated game code in dump folder (or next to .nup/.nsp)"
+                                      : "Guardar código del juego en la carpeta del volcado (o junto al .nup/.nsp)",
+                            &g.gamebuild_in_dump)) {
+            g_gc_auto = false;
+        }
+        ImGui::EndDisabled();
+        ImGui::SetItemTooltip("%s", g.ui_lang
+            ? "Places the generated gamebuild/ folder inside your dump folder (or next to your .nup/.nsp file) instead of the app data folder."
+            : "Guarda la carpeta generada gamebuild/ dentro de tu carpeta del volcado (o junto al archivo .nup/.nsp) en lugar de la carpeta de datos.");
     }
     upd_section();  // GitHub #119
 }
@@ -3353,7 +3440,7 @@ int main(int argc, char **argv) {
     bool from_recomplauncher = !env_u8("RECOMPLAUNCHER").empty();
     if (!shot && g_upd_auto && upd_is_release_build() && !from_recomplauncher) upd_start(false);
     if (shot && argc>4 && !strcmp(argv[4],"es")) g.ui_lang=0;
-    bool have_game = exists("targets/exefs/main") || exists("targets/exefs");
+    bool have_game = dump_is_valid(effective_dump_dir());
     bool have_exe = exists(GAME_EXE);
     bool run = true, launched = false;
     Cfg saved_cfg; memcpy(&saved_cfg,&g,sizeof g);
@@ -3407,25 +3494,25 @@ int main(int argc, char **argv) {
         ImGui::Begin("main", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
         launcher_header(scale);
         upd_banner();  // GitHub #119: a newer release
-#ifndef _WIN32
         if (g_dump_pending) {
             dump_poll();
-            have_game = exists("targets/exefs/main") || exists("targets/exefs");  // (the dump may have changed)
+            if (g_dump_saved) { memcpy(&saved_cfg, &g, sizeof g); g_dump_saved = false; }
+            have_game = dump_is_valid(effective_dump_dir());  // (the dump may have changed)
+            g_gc_auto = false;
         }
-        ImGui::BeginDisabled(pc_running() || g_dump_pending);
+        ImGui::BeginDisabled(pc_running() || gc_running() || g_dump_pending);
         if (ImGui::Button(g_dump_pending ? "..." : g.ui_lang ? "Select game dump" : "Elegir volcado del juego")) {
             if (!g_dump_lock) g_dump_lock = SDL_CreateMutex();
             g_dump_pending = true;
             SDL_ShowOpenFolderDialog(dump_selected, nullptr, win, NULL, false);
         }
         ImGui::EndDisabled();
-        ImGui::SetItemTooltip("%s", g.ui_lang ? "The folder with exefs/ and romfs/ (version 2.0.0). Remembered as targets/."
-                                              : "La carpeta con exefs/ y romfs/ (versión 2.0.0). Se recuerda como targets/.");
+        ImGui::SetItemTooltip("%s", g.ui_lang ? "The folder with exefs/ and romfs/ (version 2.0.0). Saved in xcde.ini."
+                                              : "La carpeta con exefs/ y romfs/ (versión 2.0.0). Se guarda en xcde.ini.");
         ImGui::SameLine();
         ImGui::TextUnformatted(have_game ? (g.ui_lang ? "Game files found" : "Archivos del juego encontrados")
                                          : (g.ui_lang ? "Select your game files" : "Elige los archivos del juego"));
         ImGui::SameLine();
-#endif
         {   // [XCDE] the launcher's own language (Spanish / English), saved with the settings
             static const char *ll[] = {"Español", "English"};
             const char *lbl = T("Idioma del launcher");

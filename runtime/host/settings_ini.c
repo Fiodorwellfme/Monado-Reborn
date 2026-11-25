@@ -68,6 +68,8 @@ bool settings_mod_enabled(const char *name) {
     return strncmp(name, "icons_", 6) != 0;  // [XCDE] button prompt packs (mods/icons_xbox...): only the one the launcher turns on
 }
 static char g_button_icons[16] = "auto";  // [XCDE] the launcher's choice (button_icons), kept when the game saves
+static char g_game_dump[1024];            // [XCDE] GitHub #259: remembered dump folder/package (xcde.ini game_dump)
+static bool g_gamebuild_in_dump;          // [XCDE] GitHub #259: store generated gamebuild inside dump folder / next to package
 
 static const char *ini_path(void) {
     static char path[1100];
@@ -79,6 +81,31 @@ static char *trim(char *s) {
     char *e = s + strlen(s);
     while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = 0;
     return s;
+}
+
+bool settings_read_game_dump(char *out, size_t cap) {
+    if (!out || !cap) return false;
+    out[0] = 0;
+    FILE *f = xcde_utf8_fopen(ini_path(), "r");
+    if (!f) return false;
+    char line[1200];
+    bool found = false;
+    while (fgets(line, sizeof line, f)) {
+        char *s = line;
+        if (strlen(s) >= 3 && !memcmp(s, "\xEF\xBB\xBF", 3)) s += 3;
+        s = trim(s);
+        if (!*s || *s == '#' || *s == ';' || *s == '[') continue;
+        char *eq = strchr(s, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *k = trim(s), *v = trim(eq + 1);
+        if (!strcmp(k, "game_dump") && *v) {
+            snprintf(out, cap, "%s", v);
+            found = true;
+        }
+    }
+    fclose(f);
+    return found;
 }
 
 // [XCDE] cheats (Monado II port): the key/value rules live in runtime/cheats_options.h, shared with the launcher.
@@ -97,7 +124,7 @@ void settings_load(void) {
     }
     FILE *f = xcde_utf8_fopen(ini_path(), "r");
     if (!f) { xcde_cheats_publish(&g_settings); return; }
-    char line[512];
+    char line[1200];
     while (fgets(line, sizeof line, f)) {
         char *s = line;
         if (strlen(s) >= 3 && !memcmp(s, "\xEF\xBB\xBF", 3)) s += 3;  // [XCDE] a UTF-8 BOM (Notepad) before the first key
@@ -195,6 +222,8 @@ void settings_load(void) {
         else if (!strcmp(k, "mod_order")) mod_order_parse(v);
         else if (!strncmp(k, "mod_", 4)) mod_set(k + 4, atoi(v) != 0);
         else if (!strcmp(k, "button_icons")) snprintf(g_button_icons, sizeof g_button_icons, "%s", v);
+        else if (!strcmp(k, "game_dump")) snprintf(g_game_dump, sizeof g_game_dump, "%s", v);
+        else if (!strcmp(k, "gamebuild_in_dump")) g_gamebuild_in_dump = atoi(v) != 0;
         else if (!gfx_load_key(&g_settings.graphics, k, v)) bind_settings_load(k, v);  // [XCDE] graphics options
     }
     fclose(f);
@@ -291,6 +320,8 @@ void settings_save(void) {
     }
     for (int i = 0; i < g_nmods; i++) fprintf(f, "mod_%s = %d\n", g_mods[i].name, g_mods[i].on);
     fprintf(f, "button_icons = %s\n", g_button_icons);
+    if (g_game_dump[0]) fprintf(f, "game_dump = %s\n", g_game_dump);
+    fprintf(f, "gamebuild_in_dump = %d\n", g_gamebuild_in_dump ? 1 : 0);
     bind_settings_save(f);
     if (!xcde_ini_commit(f, tmp, ini_path())) rt_logf("[settings] save failed; previous configuration kept\n");
 }
