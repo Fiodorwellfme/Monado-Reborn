@@ -132,6 +132,20 @@ class VulkanSourceContracts(unittest.TestCase):
         self.assertIn("GitHub #216", DEVICE)
         self.assertIn("plat_terminate();", DEVICE)  # the process ends without the DLL teardown
 
+    def test_fg_present_semaphores_hudless_ring_and_bounded_exit(self):
+        """GitHub #265: FSR 3 FG present sync, ring-buffered HUDLessColor, and bounded exit wait."""
+        temporal = (ROOT / "runtime/nvn/vulkan/temporal_fg.inc").read_text(encoding="utf-8")
+        exec_c = (ROOT / "runtime/nvn/vulkan/exec.c").read_text(encoding="utf-8")
+        self.assertIn("#define DONE_SEMS 16", DEVICE)
+        self.assertIn("done_sem[DONE_SEMS]", DEVICE)
+        self.assertIn("tmp_fg_wait_presents();", DEVICE)
+        self.assertIn("backend_is_stalled()", DEVICE)
+        self.assertIn("exit_watchdog_thread", DEVICE)
+        self.assertIn("bool backend_is_stalled(void)", exec_c)
+        self.assertIn("#define FG_HL_RING 3", temporal)
+        self.assertIn("VK_IMAGE_USAGE_TRANSFER_SRC_BIT", temporal)
+        self.assertIn("FFX_API_DISPATCH_DESC_TYPE_FGSWAPCHAIN_WAIT_FOR_PRESENTS_VK", temporal)
+
 
 if __name__ == "__main__":
     unittest.main()
