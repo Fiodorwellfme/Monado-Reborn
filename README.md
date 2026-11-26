@@ -35,15 +35,26 @@ Extra launchers: `Play Monado (performance metrics).bat` and `Play Monado (stutt
 diagnostic variants; `Crear Monado Portable.bat` builds a movable folder for another PC / USB disk (for your own
 use only), and `Limpiar Monado.bat` deletes this PC's shader cache, crash reports and logs before you move it.
 
-## What this fork adds
+## Features
 
-Fixes and improvements on top of the original Monado project (details in the
-[Releases](https://github.com/Ivanprestef2/Monado-Reborn/releases) page):
+Monado-Reborn builds on the original Monado project with major graphics, performance, audio, and quality-of-life upgrades:
 
-- **Stability and performance fixes** for heavy shaders, frame drops and crashes, with AMD/Intel GPU refinements.
-- **Streamlined setup:** self-installing build script, a portable folder and dedicated diagnostics launchers.
-- **Quality-of-life** improvements ported from Monado II (cheats, save-slot and menu extras) and a performance UI
-  with dynamic resolution and low-end profiles.
+### Graphics & Upscaling
+- **Modern upscalers & dynamic resolution:** Built-in support for **DLSS**, **FSR 3**, and **FSR 4** alongside dynamic resolution scaling.
+- **Quality presets:** Dedicated **Quality**, **Balanced**, **Performance**, **Handheld**, and **Potato** tiers tuned for everything from high-end desktops to handhelds like the Steam Deck.
+- **Ultrawide & multi-monitor support:** Native **21:9**, **32:9**, and **48:9 super-ultrawide** aspect ratios with HUD scaling, UI box alignment, display/monitor selection, and borderless or exclusive fullscreen.
+
+### Performance & Frame Pacing
+- **Unlocked FPS & smooth frame pacing:** Play at custom FPS targets (15–1000 FPS or unlimited) with **FPS-unlocked cutscenes**, present-aligned frame pacing, an **RTSS/MangoHud-style early FPS limiter**, and optional unfocused background FPS caps.
+- **Broad hardware scalability:** Tuned for strong performance across a wide range of hardware—from integrated GPUs and handhelds to high-end desktops—backed by a persistent SPIR-V shader cache and GPU pipeline policy (with AMD/Intel refinements) to eliminate gameplay stutter.
+
+### Audio
+- **Native 5.1 surround sound:** LPCM 5.1 output (`auto` / `stereo` / `5.1`) with live hot-swapping, playback device selection, and automatic mute-when-unfocused.
+
+### Launcher, In-Game Menu & Quality of Life
+- **F1 overlay & Launcher parity:** Adjust graphics, upscaling, audio, presets, and hotkeys live in-game via the **F1** menu or in the launcher—plus **Skip launcher on startup** once your copy is built.
+- **Modding & Monado II extras:** Virtual RomFS mod support with load-order priority, customizable hotkeys (menu, party switch, screenshot, field HUD toggle), and cheats, save-slot, and menu extras ported from Monado II.
+- **Streamlined setup & portability:** Self-installing Windows build script, Linux AppImage, RecompLauncher integration, portable folder builder, and dedicated performance/stutter diagnostics launchers.
 
 ## Documentation
 
